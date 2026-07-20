@@ -36,7 +36,7 @@ uv run apple_music_playlist_video.py "https://music.apple.com/…/playlist/…" 
   --limit 5
 ```
 
-Or edit the `CONFIG` block at the top of `apple_music_playlist_video.py` and run with no args.
+Or edit the defaults in `playlist_video/config.py` and run with no args.
 
 ```bash
 uv run apple_music_playlist_video.py --help
@@ -46,9 +46,24 @@ uv run apple_music_playlist_video.py --help
 
 ```
 playlist-gen/
-├── app.py                          # Textual TUI (default entry)
-├── app.tcss                        # TUI styles
-├── apple_music_playlist_video.py   # pipeline library + headless CLI
+├── app.py                          # TUI entry point (uv run app.py)
+├── apple_music_playlist_video.py   # headless CLI entry point
+├── playlist_video/                 # the pipeline package
+│   ├── config.py                   #   user-editable defaults
+│   ├── models.py                   #   Track / PipelineConfig / progress events
+│   ├── scraper.py                  #   Apple Music scraping (amp-api + Chromium)
+│   ├── downloader.py               #   yt-dlp audio + artwork fetch
+│   ├── fonts.py                    #   font loading + Pretendard fetch
+│   ├── backgrounds.py              #   gradients / blurred artwork / user images
+│   ├── text.py                     #   text textures, marquee, tabular figures
+│   ├── frames.py                   #   layout + per-track frame generator
+│   ├── transitions.py              #   dip-through-black fades
+│   ├── encoding.py                 #   VideoToolbox / NVENC / libx264 selection
+│   ├── progress.py                 #   render pool + progress loggers/queues
+│   ├── render.py                   #   per-track render worker, concat, description
+│   ├── pipeline.py                 #   fetch → download → render → concat
+│   ├── cli.py                      #   argparse CLI + marquee test
+│   └── tui/                        #   Textual TUI (screens, widgets, app.tcss)
 ├── assets/backgrounds/             # sample / custom backgrounds
 ├── output/                         # generated videos (gitignored)
 ├── README.md
