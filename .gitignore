@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# uv / tooling
+.python-version
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Playwright
+.playwright/
+
+# yt-dlp / auth
+cookies.txt
+**/cookies.txt
+
+# Generated media & workdirs
+output/*
+!output/.gitkeep
+*.mp4
+*.mov
+*.mkv
+*_description.txt
+marquee_test.*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
