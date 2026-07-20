@@ -9,11 +9,12 @@ import sys
 import tempfile
 
 from . import config as defaults
-from .encoding import ensure_encoder_compat, resolve_encode_settings
+from .encoding import encode_frames_to_file, resolve_encode_settings
 from .fonts import try_download_pretendard
-from .frames import build_track_clip
+from .frames import build_track_renderer
 from .models import PipelineConfig, Track
 from .pipeline import parse_resolution, run_pipeline
+from .transitions import iter_faded_frames
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -26,6 +27,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolution", default="1920x1080")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--no-shuffle", action="store_true")
+    parser.add_argument("--shuffle", action="store_true", help="Shuffle track order")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--tracks-json", default=None)
     parser.add_argument("--workdir", default=None)
@@ -43,7 +45,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transition-duration", type=float, default=0.6)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--render-workers", type=int, default=None)
-    parser.add_argument("--cookies-file", default=None)
     parser.add_argument("--gpu", choices=["auto", "on", "off"], default="auto")
     parser.add_argument("--preset", default=None)
     parser.add_argument("--crf", type=int, default=None)
@@ -59,6 +60,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args) -> PipelineConfig:
+    if args.shuffle:
+        shuffle = True
+    elif args.no_shuffle:
+        shuffle = False
+    else:
+        shuffle = defaults.SHUFFLE
     return PipelineConfig(
         playlist_url=args.playlist_url,
         output=args.output,
@@ -66,12 +73,11 @@ def config_from_args(args) -> PipelineConfig:
         fps=args.fps,
         limit=args.limit,
         background_images=args.background_image,
-        shuffle=not args.no_shuffle,
+        shuffle=shuffle,
         workers=args.workers,
         render_workers=args.render_workers,
         gpu=args.gpu,
         transition_duration=args.transition_duration,
-        cookies_file=args.cookies_file,
         tracks_json=args.tracks_json,
         workdir=args.workdir,
         font_dir=args.font_dir,
@@ -109,17 +115,25 @@ def run_marquee_test(args) -> None:
     track.artwork_path = None
     print(f"Rendering marquee test: {resolution[0]}x{resolution[1]} @ {args.fps}fps, "
           f"{duration}s -> {args.test_marquee_output}")
-    clip = build_track_clip(track, resolution, args.fps, background_image=None, font_dir=font_dir)
-    clip = clip.without_audio()
+    make_frame, _audio_duration = build_track_renderer(track, resolution, None, font_dir)
+    # Use requested test duration (silence wav length) for frame count.
     encode = resolve_encode_settings(args.gpu, args.preset, args.crf, resolution, args.fps)
-    ensure_encoder_compat(encode.codec)
-    write_kwargs = dict(
-        fps=args.fps, codec=encode.codec, audio=False, threads=os.cpu_count() or 2,
-        ffmpeg_params=encode.ffmpeg_params,
+    total_frames = max(1, int(round(duration * args.fps)))
+
+    def frames():
+        for frame, _t, _i in iter_faded_frames(make_frame, duration, args.fps, 0.0):
+            yield frame
+
+    encode_frames_to_file(
+        frames(),
+        args.test_marquee_output,
+        encode,
+        resolution=resolution,
+        fps=args.fps,
+        audio_path=None,
+        ffmpeg_threads=os.cpu_count() or 2,
+        total_frames=total_frames,
     )
-    if encode.preset is not None:
-        write_kwargs["preset"] = encode.preset
-    clip.write_videofile(args.test_marquee_output, **write_kwargs)
     print("Done:", args.test_marquee_output)
 
 
@@ -145,10 +159,10 @@ def _argv_from_config():
             else list(defaults.BACKGROUND_IMAGE)
         )
         argv += ["--background-image", *images]
-    if not defaults.SHUFFLE:
+    if defaults.SHUFFLE:
+        argv += ["--shuffle"]
+    else:
         argv += ["--no-shuffle"]
-    if defaults.COOKIES_FILE:
-        argv += ["--cookies-file", defaults.COOKIES_FILE]
     return argv
 
 
@@ -169,6 +183,9 @@ def main(argv=None) -> None:
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"! {e}")
         sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n! Cancelled")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

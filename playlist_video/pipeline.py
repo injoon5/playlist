@@ -2,22 +2,22 @@
 
 import os
 import random
-import shutil
 import tempfile
-import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import List, Optional, Tuple
 
 from .backgrounds import assign_track_backgrounds, resolve_background_images
 from .downloader import download_track_media
-from .encoding import resolve_encode_settings
+from .encoding import kill_active_encodes, resolve_encode_settings
 from .fonts import try_download_pretendard
 from .models import (
+    CancelledError,
     PipelineConfig,
     PipelineResult,
     ProgressCallback,
     ProgressEvent,
     Track,
+    check_cancelled,
     emit_progress,
     track_label,
 )
@@ -33,6 +33,7 @@ def parse_resolution(s: str) -> Tuple[int, int]:
 
 def _fetch_tracks(config: PipelineConfig, on_progress: Optional[ProgressCallback]) -> List[Track]:
     quiet = config.quiet
+    check_cancelled(config.cancel_event)
     emit_progress(on_progress, ProgressEvent(
         phase="fetch", completed=0, total=1, message="Fetching track list…",
     ))
@@ -67,13 +68,13 @@ def _fetch_tracks(config: PipelineConfig, on_progress: Optional[ProgressCallback
 def _download_phase(
     tracks: List[Track],
     workdir: str,
-    cookies_file: Optional[str],
     config: PipelineConfig,
     on_progress: Optional[ProgressCallback],
 ) -> None:
     """Fetch audio + artwork for every track in parallel, emitting per-slot
     progress. Mutates each track's audio_path/artwork_path in place."""
     quiet = config.quiet
+    cancel_event = config.cancel_event
     for t in tracks:
         emit_progress(on_progress, ProgressEvent(
             phase="download", completed=0, total=len(tracks),
@@ -86,6 +87,7 @@ def _download_phase(
     if not quiet:
         print(f"Downloading audio + artwork for {len(tracks)} tracks ({config.workers} at a time)...")
     download_workers = max(1, config.workers)
+    import threading
     slot_pool: List[int] = list(range(download_workers))
     slot_lock = threading.Lock()
     done_count = 0
@@ -96,6 +98,7 @@ def _download_phase(
             return done_count
 
     def _download_one(track: Track) -> Track:
+        check_cancelled(cancel_event)
         with slot_lock:
             slot_id = slot_pool.pop(0) if slot_pool else 0
         label = track_label(track)
@@ -115,7 +118,9 @@ def _download_phase(
 
         on_fraction(0.0)
         try:
-            download_track_media(track, workdir, cookies_file, on_fraction=on_fraction, quiet=quiet)
+            download_track_media(
+                track, workdir, on_fraction=on_fraction, quiet=quiet, cancel_event=cancel_event,
+            )
         finally:
             emit_progress(on_progress, ProgressEvent(
                 phase="download",
@@ -132,9 +137,12 @@ def _download_phase(
                 slot_pool.append(slot_id)
         return track
 
-    with ThreadPoolExecutor(max_workers=download_workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=download_workers)
+    try:
         futures = {pool.submit(_download_one, t): t for t in tracks}
         for future in as_completed(futures):
+            if cancel_event.is_set():
+                break
             track = futures[future]
             with done_lock:
                 done_count += 1
@@ -142,15 +150,22 @@ def _download_phase(
             try:
                 future.result()
                 status = "ok" if track.audio_path else "skipped"
+                extra = ""
+                if track.audio_path and track.matched_video_title and not quiet:
+                    extra = f" (yt: {track.matched_video_title[:60]})"
+            except CancelledError:
+                status = "cancelled"
+                extra = ""
             except Exception as e:
                 status = "failed"
+                extra = ""
                 if not quiet:
                     print(f"  [{completed}/{len(tracks)}] {track_label(track)}: failed ({e})")
             else:
                 if not quiet:
                     print(
                         f"  [{completed}/{len(tracks)}] {track_label(track)}: "
-                        f"{'ok' if track.audio_path else 'no audio found'}"
+                        f"{'ok' if track.audio_path else 'no audio found'}{extra}"
                     )
             emit_progress(on_progress, ProgressEvent(
                 phase="download",
@@ -162,6 +177,13 @@ def _download_phase(
                 track_status=status,
                 fraction=1.0 if status == "ok" else None,
             ))
+    finally:
+        if cancel_event.is_set():
+            pool.shutdown(wait=False, cancel_futures=True)
+        else:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    check_cancelled(cancel_event)
 
 
 def _render_phase(
@@ -173,9 +195,9 @@ def _render_phase(
     config: PipelineConfig,
     on_progress: Optional[ProgressCallback],
 ) -> List[Optional[str]]:
-    """Render every downloadable track to its own clip file in parallel.
-    Returns clip paths aligned with `renderable` (None where a render failed)."""
+    """Render every downloadable track to its own clip file in parallel."""
     quiet = config.quiet
+    cancel_event = config.cancel_event
     cpu_count = os.cpu_count() or 4
     render_workers = config.render_workers or min(len(renderable), cpu_count)
     render_workers = max(1, render_workers)
@@ -197,11 +219,15 @@ def _render_phase(
     try:
         futures = {}
         for i, (track, track_bg) in enumerate(renderable):
+            check_cancelled(cancel_event)
             out_path = os.path.join(workdir, f"clip_{track.index:03d}.mp4")
             fut = pool.submit(
                 render_track_to_file, track, track_bg, resolution, config.fps,
                 font_dir, config.transition_duration, encode, out_path, position_pool,
                 ffmpeg_threads, progress_queue, quiet,
+                # threading.Event is not picklable across ProcessPool workers;
+                # TUI uses quiet=True → ThreadPool, where cancel works.
+                cancel_event if quiet else None,
             )
             futures[fut] = (i, track, out_path)
             emit_progress(on_progress, ProgressEvent(
@@ -213,6 +239,11 @@ def _render_phase(
 
         pending = set(futures.keys())
         while pending:
+            if cancel_event.is_set():
+                kill_active_encodes()
+                for fut in pending:
+                    fut.cancel()
+                break
             drain_render_queue(progress_queue, on_progress, rendered_done, len(renderable))
             done_now, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
             for fut in done_now:
@@ -227,6 +258,9 @@ def _render_phase(
                         _tqdm.write(
                             f"  [{rendered_done + 1}/{len(renderable)}] {track_label(track)}: rendered"
                         )
+                except CancelledError:
+                    status = "cancelled"
+                    msg = f"Cancelled {track_label(track)}"
                 except Exception as e:
                     status = "failed"
                     msg = f"Failed {track_label(track)}: {e}"
@@ -250,10 +284,13 @@ def _render_phase(
                 ))
         drain_render_queue(progress_queue, on_progress, rendered_done, len(renderable))
     finally:
+        if cancel_event.is_set():
+            kill_active_encodes()
         cleanup_pool()
 
     if overall_bar is not None:
         overall_bar.close()
+    check_cancelled(cancel_event)
     return clip_paths
 
 
@@ -263,91 +300,91 @@ def run_pipeline(
 ) -> PipelineResult:
     """Full playlist → video pipeline with optional progress callbacks."""
     quiet = config.quiet
-    resolution = parse_resolution(config.resolution)
-    workdir = config.workdir or tempfile.mkdtemp(prefix="amp_video_")
-    os.makedirs(workdir, exist_ok=True)
-    out_dir = os.path.dirname(os.path.abspath(config.output))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+    try:
+        resolution = parse_resolution(config.resolution)
+        workdir = config.workdir or tempfile.mkdtemp(prefix="amp_video_")
+        os.makedirs(workdir, exist_ok=True)
+        out_dir = os.path.dirname(os.path.abspath(config.output))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
 
-    background_images = resolve_background_images(config.background_images, workdir, quiet=quiet)
+        background_images = resolve_background_images(config.background_images, workdir, quiet=quiet)
 
-    cookies_file = config.cookies_file
-    if cookies_file:
-        if not os.path.exists(cookies_file):
-            raise FileNotFoundError(f"cookies file not found: {cookies_file}")
-        writable_cookies = os.path.join(workdir, "cookies.txt")
-        shutil.copyfile(cookies_file, writable_cookies)
-        cookies_file = writable_cookies
+        font_dir = config.font_dir
+        if font_dir is None:
+            font_dir = try_download_pretendard(os.path.join(workdir, "fonts"))
 
-    font_dir = config.font_dir
-    if font_dir is None:
-        font_dir = try_download_pretendard(os.path.join(workdir, "fonts"))
+        tracks = _fetch_tracks(config, on_progress)
 
-    tracks = _fetch_tracks(config, on_progress)
+        if len(background_images) > len(tracks):
+            raise ValueError(
+                f"{len(background_images)} background images but only {len(tracks)} track(s)"
+            )
 
-    if len(background_images) > len(tracks):
-        raise ValueError(
-            f"{len(background_images)} background images but only {len(tracks)} track(s)"
+        track_backgrounds = assign_track_backgrounds(tracks, background_images)
+
+        _download_phase(tracks, workdir, config, on_progress)
+
+        encode = resolve_encode_settings(
+            config.gpu, config.preset, config.crf, resolution, config.fps, quiet=quiet,
         )
 
-    track_backgrounds = assign_track_backgrounds(tracks, background_images)
+        renderable = [
+            (track, track_bg) for track, track_bg in zip(tracks, track_backgrounds) if track.audio_path
+        ]
+        for track in tracks:
+            if not track.audio_path:
+                if not quiet:
+                    print(f"  [{track.index}/{track.total}] {track_label(track)}: skipping (no audio)")
+                emit_progress(on_progress, ProgressEvent(
+                    phase="render", completed=0, total=max(len(renderable), 1),
+                    message=f"Skipping {track_label(track)}",
+                    track_index=track.index, track_label=track_label(track),
+                    track_status="skipped",
+                ))
+        if not renderable:
+            raise RuntimeError("No tracks with audio. Aborting.")
 
-    _download_phase(tracks, workdir, cookies_file, config, on_progress)
+        clip_paths = _render_phase(
+            renderable, workdir, font_dir, resolution, encode, config, on_progress,
+        )
 
-    encode = resolve_encode_settings(
-        config.gpu, config.preset, config.crf, resolution, config.fps, quiet=quiet,
-    )
+        finished_paths = [p for p in clip_paths if p]
+        if not finished_paths:
+            raise RuntimeError("No clips were rendered successfully. Aborting.")
 
-    renderable = [
-        (track, track_bg) for track, track_bg in zip(tracks, track_backgrounds) if track.audio_path
-    ]
-    for track in tracks:
-        if not track.audio_path:
-            if not quiet:
-                print(f"  [{track.index}/{track.total}] {track_label(track)}: skipping (no audio)")
-            emit_progress(on_progress, ProgressEvent(
-                phase="render", completed=0, total=max(len(renderable), 1),
-                message=f"Skipping {track_label(track)}",
-                track_index=track.index, track_label=track_label(track),
-                track_status="skipped",
-            ))
-    if not renderable:
-        raise RuntimeError("No tracks with audio. Aborting.")
+        check_cancelled(config.cancel_event)
+        emit_progress(on_progress, ProgressEvent(
+            phase="concat", completed=0, total=1,
+            message=f"Stitching {len(finished_paths)} clips…",
+        ))
+        if not quiet:
+            print(f"Stitching {len(finished_paths)} rendered clip(s) into {config.output} ...")
+        concat_clips(finished_paths, config.output, workdir)
 
-    clip_paths = _render_phase(
-        renderable, workdir, font_dir, resolution, encode, config, on_progress,
-    )
+        entries = [(renderable[i][0], p) for i, p in enumerate(clip_paths) if p]
+        desc_path = write_description(entries, config.output)
+        with open(desc_path, "r", encoding="utf-8") as f:
+            description_text = f.read()
 
-    finished_paths = [p for p in clip_paths if p]
-    if not finished_paths:
-        raise RuntimeError("No clips were rendered successfully. Aborting.")
+        emit_progress(on_progress, ProgressEvent(
+            phase="done", completed=1, total=1,
+            message=f"Done: {config.output}",
+        ))
+        if not quiet:
+            print(f"\nDescription ({desc_path}):")
+            print(description_text.rstrip())
+            print("\nDone:", config.output)
 
-    emit_progress(on_progress, ProgressEvent(
-        phase="concat", completed=0, total=1,
-        message=f"Stitching {len(finished_paths)} clips…",
-    ))
-    if not quiet:
-        print(f"Stitching {len(finished_paths)} rendered clip(s) into {config.output} ...")
-    concat_clips(finished_paths, config.output, workdir)
-
-    entries = [(renderable[i][0], p) for i, p in enumerate(clip_paths) if p]
-    desc_path = write_description(entries, config.output)
-    with open(desc_path, "r", encoding="utf-8") as f:
-        description_text = f.read()
-
-    emit_progress(on_progress, ProgressEvent(
-        phase="done", completed=1, total=1,
-        message=f"Done: {config.output}",
-    ))
-    if not quiet:
-        print(f"\nDescription ({desc_path}):")
-        print(description_text.rstrip())
-        print("\nDone:", config.output)
-
-    return PipelineResult(
-        output_path=config.output,
-        description_path=desc_path,
-        tracks=tracks,
-        description_text=description_text,
-    )
+        return PipelineResult(
+            output_path=config.output,
+            description_path=desc_path,
+            tracks=tracks,
+            description_text=description_text,
+        )
+    except CancelledError:
+        kill_active_encodes()
+        emit_progress(on_progress, ProgressEvent(
+            phase="cancelled", completed=0, total=1, message="Cancelled",
+        ))
+        raise

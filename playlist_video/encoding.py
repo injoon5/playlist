@@ -1,11 +1,16 @@
-"""Encoder selection (VideoToolbox / NVENC / libx264-x265) and a moviepy
-write_videofile wrapper that keeps VideoToolbox happy."""
+"""Encoder selection (VideoToolbox / NVENC / libx264-x265) and raw-frame
+ffmpeg piping (no moviepy)."""
 
 import platform
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import List, Optional
+from threading import Event
+from typing import Callable, Iterator, List, Optional, Tuple
+
+import numpy as np
+
+from .models import CancelledError, check_cancelled
 
 
 def _ffmpeg_has_encoder(name: str) -> bool:
@@ -23,11 +28,7 @@ def _ffmpeg_has_encoder(name: str) -> bool:
 def pick_hw_encoder() -> Optional[str]:
     """
     Return the best available hardware H.264 encoder for this machine, or None
-    for software libx264. macOS -> VideoToolbox (works on both Apple Silicon
-    and Intel Macs with any ffmpeg build that has it, which Homebrew's does).
-    Linux with an NVIDIA GPU + nvenc-capable ffmpeg -> NVENC. Otherwise None.
-    (On Apple Silicon, resolve_encode_settings upgrades the VideoToolbox
-    choice to HEVC when the ffmpeg build has hevc_videotoolbox.)
+    for software libx264. macOS -> VideoToolbox. Linux + NVIDIA -> NVENC.
     """
     if platform.system() == "Darwin" and _ffmpeg_has_encoder("h264_videotoolbox"):
         return "h264_videotoolbox"
@@ -43,15 +44,7 @@ def pick_hw_encoder() -> Optional[str]:
 
 
 def estimate_nvenc_bitrate_mbps(resolution, fps: int) -> int:
-    """
-    A sensible target video bitrate for hardware encoders, scaled from
-    YouTube's published recommended upload bitrate for 1080p60 (~12Mbps)
-    plus headroom (16Mbps at 1080p60 here). Deliberately bitrate-based
-    (-b:v) rather than constant-quality (-cq/-qp): those option names have
-    shifted across ffmpeg/NVENC SDK versions and aren't reliably available
-    on every build (e.g. Colab's apt ffmpeg), whereas -b:v has been stable
-    forever and works everywhere NVENC itself works.
-    """
+    """Target video bitrate scaled from YouTube's ~12Mbps 1080p60 recommendation."""
     w, h = resolution
     pixel_scale = (w * h) / (1920 * 1080)
     fps_scale = fps / 60
@@ -62,13 +55,8 @@ def is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() in ("arm64", "aarch64")
 
 
-VT_QUALITY_DEFAULT = 65  # videotoolbox -q:v (1-100). With HEVC, ~60-65 lands at the same
-                          # perceptual quality H.264 needed ~70 for, at a much smaller file;
-                          # raise toward 75 if you ever spot banding in dark gradients.
+VT_QUALITY_DEFAULT = 65
 
-# Standardizing sample rate/channels across every per-track render is what
-# makes the final ffmpeg concat (-c copy, see playlist_video.render) safe:
-# concat demuxer stream-copy requires every input segment's streams to match.
 _CONCAT_SAFE_AUDIO_PARAMS = ["-ar", "48000", "-ac", "2"]
 _MOVFLAGS = ["-movflags", "+faststart"]
 
@@ -81,25 +69,12 @@ class EncodeSettings:
 
 
 def _gop_params(fps: int) -> List[str]:
-    """
-    Long keyframe interval (~10s). This video is mostly static, so spending
-    a full intra frame only every ~10s — instead of the encoder's much
-    shorter default — lets nearly every frame be a cheap P-frame referencing
-    an unchanged background: a large file-size win at zero visual cost.
-    (Seeking granularity in local players gets slightly coarser; YouTube
-    re-encodes with its own GOP on upload anyway.)
-    """
     return ["-g", str(max(fps, 1) * 10)]
 
 
 def software_encode_settings(
     preset_arg: Optional[str], crf_arg: Optional[int], fps: int = 30
 ) -> EncodeSettings:
-    # "slow" over "veryfast": this video is almost entirely static (only the
-    # marquee, progress bar, and track transitions move), so x264's slower
-    # motion search finds far more redundancy to exploit than it would on
-    # typical high-motion footage — a big size/quality win for not that much
-    # extra encode time, since most macroblocks skip early anyway.
     preset = preset_arg or "slow"
     crf = crf_arg if crf_arg is not None else 18
     ffmpeg_params = [
@@ -110,12 +85,7 @@ def software_encode_settings(
 
 
 def software_fallback_for(encode: EncodeSettings, fps: int = 30) -> EncodeSettings:
-    """
-    Software encoder matching the failed hardware encoder's CODEC FAMILY, so
-    a per-track fallback stays stream-copy concat-compatible with the tracks
-    that hardware-encoded fine — concat_clips uses -c copy, and mixing
-    H.264 and HEVC segments in one concat list would break it.
-    """
+    """Software encoder matching the failed hardware encoder's codec family."""
     if encode.codec.startswith("hevc"):
         return EncodeSettings(
             codec="libx265",
@@ -130,13 +100,6 @@ def software_fallback_for(encode: EncodeSettings, fps: int = 30) -> EncodeSettin
 
 def resolve_encode_settings(gpu_choice: str, preset_arg: Optional[str], crf_arg: Optional[int],
                             resolution, fps: int, quiet: bool = False) -> EncodeSettings:
-    """
-    Picks the codec + quality/rate-control settings once, shared by every
-    per-track parallel render (and the marquee test). Prefers constant
-    quality over a flat bitrate wherever the encoder supports it, since a
-    flat bitrate assumes constant motion complexity — wasteful and lower
-    quality-per-bit for content this static.
-    """
     def log(msg: str) -> None:
         if not quiet:
             print(msg)
@@ -150,16 +113,8 @@ def resolve_encode_settings(gpu_choice: str, preset_arg: Optional[str], crf_arg:
     if hw == "h264_videotoolbox":
         gop = _gop_params(fps)
         if is_apple_silicon():
-            # Constant quality (-q:v) is Apple Silicon-only in ffmpeg; it
-            # adapts bits to per-frame complexity instead of a flat rate, so
-            # the long static stretches between marquee/bar/transition
-            # motion cost almost nothing while motion still looks great.
             quality = VT_QUALITY_DEFAULT
             if _ffmpeg_has_encoder("hevc_videotoolbox"):
-                # HEVC over H.264: ~35-45% smaller at the same perceptual
-                # quality, encoded by the same dedicated media-engine hardware
-                # (no speed cost). -tag:v hvc1 makes the mp4 play natively in
-                # QuickTime/Safari; YouTube accepts HEVC uploads.
                 ffmpeg_params = ["-q:v", str(quality), "-tag:v", "hvc1", "-allow_sw", "1",
                                  "-pix_fmt", "yuv420p",
                                  "-frames_before", "true", "-frames_after", "true",
@@ -194,87 +149,132 @@ def resolve_encode_settings(gpu_choice: str, preset_arg: Optional[str], crf_arg:
     return settings
 
 
-# ---------------------------------------------------------------------------
-# VideoToolbox `-preset` workaround
-#
-# moviepy's ffmpeg writer always injects `-preset <name>` into the ffmpeg
-# command it builds, and VideoToolbox encoders reject that option. The old
-# implementation temporarily monkey-patched subprocess.Popen around each
-# write — a race when several render threads write concurrently (the TUI's
-# quiet path uses a thread pool). Instead we install, once per process, a
-# subprocess-module proxy on moviepy's ffmpeg_writer module whose Popen
-# strips `-preset` only from commands that use a videotoolbox codec. The
-# decision is per-command, so it is safe under any thread interleaving and
-# leaves every other encoder's command untouched.
-# ---------------------------------------------------------------------------
-
-_vt_filter_lock = threading.Lock()
-_vt_filter_installed = False
+def probe_audio_duration(path: str) -> float:
+    """Audio/container duration in seconds via ffprobe."""
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+        ],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.strip()
+    return float(out)
 
 
-def _strip_preset(cmd):
-    filtered, skip_next = [], False
-    for part in cmd:
-        if skip_next:
-            skip_next = False
-            continue
-        if part == "-preset":
-            skip_next = True
-            continue
-        filtered.append(part)
-    return filtered
-
-
-def _install_videotoolbox_preset_filter() -> None:
-    global _vt_filter_installed
-    with _vt_filter_lock:
-        if _vt_filter_installed:
-            return
-        import moviepy.video.io.ffmpeg_writer as ffmpeg_writer
-
-        real_popen = subprocess.Popen
-
-        def _filtering_popen(cmd, *args, **kwargs):
-            if isinstance(cmd, (list, tuple)) and any(
-                isinstance(part, str) and "videotoolbox" in part for part in cmd
-            ):
-                cmd = _strip_preset(list(cmd))
-            return real_popen(cmd, *args, **kwargs)
-
-        class _SubprocessProxy:
-            """Stands in for the `subprocess` module inside moviepy's
-            ffmpeg_writer only; everything except Popen passes through."""
-            Popen = staticmethod(_filtering_popen)
-
-            def __getattr__(self, name):
-                return getattr(subprocess, name)
-
-        ffmpeg_writer.sp = _SubprocessProxy()
-        _vt_filter_installed = True
-
-
-def ensure_encoder_compat(codec: str) -> None:
-    """Call before any moviepy write using `codec`; installs the
-    VideoToolbox -preset filter when needed (idempotent, thread-safe)."""
-    if "videotoolbox" in codec:
-        _install_videotoolbox_preset_filter()
-
-
-def write_videofile(clip, out_path: str, encode: EncodeSettings, *, fps: int,
-                    ffmpeg_threads: int, logger) -> None:
-    """moviepy write_videofile with the encoder settings applied and the
-    VideoToolbox -preset incompatibility handled."""
-    ensure_encoder_compat(encode.codec)
-    write_kwargs = dict(
-        fps=fps,
-        codec=encode.codec,
-        audio_codec="aac",
-        audio_bitrate="192k",
-        threads=ffmpeg_threads,
-        ffmpeg_params=list(encode.ffmpeg_params),
-        verbose=False,
-        logger=logger,
-    )
+def _build_ffmpeg_cmd(
+    out_path: str,
+    encode: EncodeSettings,
+    resolution: Tuple[int, int],
+    fps: int,
+    audio_path: Optional[str],
+    ffmpeg_threads: int,
+) -> List[str]:
+    w, h = resolution
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", f"{w}x{h}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+    ]
+    if audio_path:
+        cmd += ["-i", audio_path]
+    cmd += ["-c:v", encode.codec]
     if encode.preset is not None:
-        write_kwargs["preset"] = encode.preset
-    clip.write_videofile(out_path, **write_kwargs)
+        cmd += ["-preset", encode.preset]
+    cmd += list(encode.ffmpeg_params)
+    if audio_path:
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-threads", str(max(1, ffmpeg_threads)), out_path]
+    return cmd
+
+
+# Registry of live ffmpeg Popen handles so cancel can kill them.
+_active_encodes: List[subprocess.Popen] = []
+_active_lock = threading.Lock()
+
+
+def encode_frames_to_file(
+    frames: Iterator[np.ndarray],
+    out_path: str,
+    encode: EncodeSettings,
+    resolution: Tuple[int, int],
+    fps: int,
+    audio_path: Optional[str] = None,
+    ffmpeg_threads: int = 2,
+    total_frames: Optional[int] = None,
+    on_frame: Optional[Callable[[int, int], None]] = None,
+    cancel_event: Optional[Event] = None,
+) -> None:
+    """
+    Pipe RGB24 frames into ffmpeg and mux optional audio. Raises CancelledError
+    if cancel_event is set; kills the ffmpeg child in that case.
+    """
+    cmd = _build_ffmpeg_cmd(out_path, encode, resolution, fps, audio_path, ffmpeg_threads)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError("ffmpeg not found on PATH") from e
+
+    with _active_lock:
+        _active_encodes.append(proc)
+
+    frame_idx = 0
+    total = total_frames or 0
+    try:
+        assert proc.stdin is not None
+        for frame in frames:
+            check_cancelled(cancel_event)
+            if frame.dtype != np.uint8:
+                frame = frame.astype(np.uint8)
+            if not frame.flags["C_CONTIGUOUS"]:
+                frame = np.ascontiguousarray(frame)
+            try:
+                proc.stdin.write(frame.tobytes())
+            except BrokenPipeError as e:
+                err = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", errors="ignore")
+                raise RuntimeError(f"ffmpeg encode failed: {err.strip() or e}") from e
+            frame_idx += 1
+            if on_frame is not None:
+                on_frame(frame_idx, total if total else frame_idx)
+        proc.stdin.close()
+        stderr_data = proc.stderr.read() if proc.stderr else b""
+        rc = proc.wait(timeout=600)
+        if rc != 0:
+            err = stderr_data.decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"ffmpeg exited {rc}: {err[-2000:]}")
+    except CancelledError:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise
+    finally:
+        with _active_lock:
+            if proc in _active_encodes:
+                _active_encodes.remove(proc)
+        if proc.stdin and not proc.stdin.closed:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+
+def kill_active_encodes() -> None:
+    """Best-effort kill of in-flight ffmpeg encode processes (used on cancel)."""
+    with _active_lock:
+        procs = list(_active_encodes)
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:
+            pass

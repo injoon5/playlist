@@ -10,6 +10,7 @@ playlist_video.cli and the Textual TUI is playlist_video.tui.
 """
 
 from .models import (
+    CancelledError,
     PipelineConfig,
     PipelineResult,
     ProgressCallback,
@@ -21,6 +22,7 @@ from .pipeline import parse_resolution, run_pipeline
 from .scraper import fetch_playlist_tracks, get_manual_tracks
 
 __all__ = [
+    "CancelledError",
     "PipelineConfig",
     "PipelineResult",
     "ProgressCallback",

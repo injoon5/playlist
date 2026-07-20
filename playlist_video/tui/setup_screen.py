@@ -316,7 +316,6 @@ class SetupScreen(Screen):
             render_workers=render_workers,
             gpu=gpu,
             transition_duration=defaults.TRANSITION_DURATION,
-            cookies_file=defaults.COOKIES_FILE or None,
             quiet=True,
             tracks=tracks,
         )

@@ -3,19 +3,17 @@
 # dependencies = [
 #     "textual",
 #     "yt-dlp[default]",
-#     "moviepy<2",
 #     "pillow",
 #     "requests",
 #     "numpy",
 #     "playwright",
 #     "tqdm",
-#     "proglog",
 # ]
 # ///
 """Textual TUI entry point:  uv run app.py
 
-The TUI itself lives in playlist_video/tui/ (screens, widgets, messages);
-the pipeline it drives lives in the playlist_video package.
+Prefer: uv sync && uv run playlist-gen
+The TUI lives in playlist_video/tui/; the pipeline in playlist_video/.
 """
 
 from playlist_video.tui.app import main
