@@ -13,7 +13,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Footer, Header, Label, ProgressBar, RichLog
 from textual.worker import get_current_worker
 
-from ..models import PipelineConfig, ProgressEvent, Track
+from ..models import CancelledError, PipelineConfig, ProgressEvent, Track
 from ..pipeline import run_pipeline
 from .messages import PipelineFinished, PipelineProgress
 from .widgets import TrackProgressRow
@@ -97,6 +97,9 @@ class RunScreen(Screen):
             result = run_pipeline(config, on_progress=on_progress)
             if not worker.is_cancelled:
                 self.post_message(PipelineFinished(result))
+        except CancelledError:
+            if not worker.is_cancelled:
+                self.post_message(PipelineFinished(None, error="Cancelled"))
         except Exception as e:
             if not worker.is_cancelled:
                 self.post_message(PipelineFinished(None, error=str(e)))
@@ -173,6 +176,11 @@ class RunScreen(Screen):
             row.clear_slot()
         if message.error:
             err = message.error
+            if err == "Cancelled":
+                self.query_one("#phase-label", Label).update("Cancelled")
+                self.query_one("#run-log", RichLog).write("[yellow]Cancelled[/]")
+                self.notify("Cancelled", severity="warning")
+                return
             short = err if len(err) <= 60 else err[:57] + "…"
             self.query_one("#phase-label", Label).update(f"Failed: {short}")
             self.query_one("#run-log", RichLog).write(f"[red]Error:[/] {message.error}")
@@ -193,13 +201,14 @@ class RunScreen(Screen):
     def action_cancel(self) -> None:
         if self._finished:
             return
+        self.config.cancel_event.set()
         self.workers.cancel_all()
-        self.query_one("#phase-label", Label).update("Cancelled — in-flight renders may finish")
-        self.query_one("#btn-new", Button).disabled = False
+        self.query_one("#phase-label", Label).update("Cancelling…")
         self.notify("Cancel requested", severity="warning")
 
     def action_back(self) -> None:
         if not self._finished:
+            self.config.cancel_event.set()
             self.workers.cancel_all()
         self.app.pop_screen()
 

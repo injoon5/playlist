@@ -1,7 +1,12 @@
 """Shared data model: tracks, pipeline configuration, and progress events."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Event
 from typing import Callable, List, Optional
+
+
+class CancelledError(Exception):
+    """Raised when the pipeline is cancelled cooperatively."""
 
 
 @dataclass
@@ -18,6 +23,7 @@ class Track:
     audio_path: Optional[str] = None
     artwork_path: Optional[str] = None
     duration_sec: Optional[float] = None
+    matched_video_title: Optional[str] = None
 
 
 @dataclass
@@ -28,12 +34,11 @@ class PipelineConfig:
     fps: int = 30
     limit: Optional[int] = None
     background_images: Optional[List[str]] = None
-    shuffle: bool = True
+    shuffle: bool = False
     workers: int = 4
     render_workers: Optional[int] = None
     gpu: str = "auto"
     transition_duration: float = 0.6
-    cookies_file: Optional[str] = None
     tracks_json: Optional[str] = None
     workdir: Optional[str] = None
     font_dir: Optional[str] = None
@@ -43,11 +48,13 @@ class PipelineConfig:
     quiet: bool = False
     # Pre-fetched / user-selected tracks from the TUI. When set, scrape is skipped.
     tracks: Optional[List[Track]] = None
+    # Cooperative cancel: set by TUI Cancel; download/render poll and abort.
+    cancel_event: Event = field(default_factory=Event)
 
 
 @dataclass
 class ProgressEvent:
-    phase: str  # fetch | download | render | concat | done
+    phase: str  # fetch | download | render | concat | done | cancelled
     completed: int
     total: int
     message: str
@@ -76,3 +83,8 @@ def track_label(track: Track) -> str:
 def emit_progress(on_progress: Optional[ProgressCallback], event: ProgressEvent) -> None:
     if on_progress is not None:
         on_progress(event)
+
+
+def check_cancelled(cancel_event: Optional[Event]) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledError("Cancelled")

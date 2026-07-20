@@ -117,58 +117,80 @@ def fetch_apple_music_tracks_browser(playlist_url: str) -> List[Track]:
     "token isn't in the raw HTML" problem and CORS entirely.
 
     Requires:
-        pip install playwright
-        playwright install chromium --with-deps
+        uv sync   # or: pip install playwright
+        playwright install chromium
     """
     try:
         from playwright.sync_api import sync_playwright
-    except ImportError:
+    except ImportError as e:
         raise RuntimeError(
             "Playwright isn't installed. Run:\n"
-            "  pip install playwright\n"
-            "  playwright install chromium --with-deps"
-        )
+            "  uv sync\n"
+            "  uv run playwright install chromium"
+        ) from e
 
     storefront, playlist_id = _parse_playlist_url(playlist_url)
 
     items: list = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(
-                user_agent=f"{_USER_AGENT} (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-                ignore_https_errors=True,
-            )
-            page.goto(playlist_url, wait_until="networkidle", timeout=60000)
-            page.wait_for_function(
-                "window.MusicKit && MusicKit.getInstance && MusicKit.getInstance().developerToken",
-                timeout=30000,
-            )
-
-            offset, limit = 0, 100
-            while True:
-                batch = page.evaluate(
-                    """async ({storefront, playlistId, offset, limit}) => {
-                        const token = MusicKit.getInstance().developerToken;
-                        const mut = MusicKit.getInstance().musicUserToken || '';
-                        const resp = await fetch(
-                            `https://amp-api.music.apple.com/v1/catalog/${storefront}/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}`,
-                            { headers: { Authorization: `Bearer ${token}`, 'Music-User-Token': mut, Origin: 'https://music.apple.com' } }
-                        );
-                        if (!resp.ok) return { error: resp.status };
-                        return await resp.json();
-                    }""",
-                    {"storefront": storefront, "playlistId": playlist_id, "offset": offset, "limit": limit},
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True)
+            except Exception as e:
+                raise RuntimeError(
+                    "Chromium isn't installed for Playwright. Run:\n"
+                    "  uv run playwright install chromium\n"
+                    f"(underlying error: {e})"
+                ) from e
+            try:
+                page = browser.new_page(
+                    user_agent=f"{_USER_AGENT} (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                    ignore_https_errors=True,
                 )
-                if not batch or batch.get("error"):
-                    raise RuntimeError(f"amp-api request failed inside browser: {batch}")
-                batch_items = batch.get("data", [])
-                items.extend(batch_items)
-                if len(batch_items) < limit:
-                    break
-                offset += limit
-        finally:
-            browser.close()
+                page.goto(playlist_url, wait_until="networkidle", timeout=60000)
+                page.wait_for_function(
+                    "window.MusicKit && MusicKit.getInstance && MusicKit.getInstance().developerToken",
+                    timeout=30000,
+                )
+
+                offset, limit = 0, 100
+                while True:
+                    batch = page.evaluate(
+                        """async ({storefront, playlistId, offset, limit}) => {
+                            const token = MusicKit.getInstance().developerToken;
+                            const mut = MusicKit.getInstance().musicUserToken || '';
+                            const resp = await fetch(
+                                `https://amp-api.music.apple.com/v1/catalog/${storefront}/playlists/${playlistId}/tracks?limit=${limit}&offset=${offset}`,
+                                { headers: { Authorization: `Bearer ${token}`, 'Music-User-Token': mut, Origin: 'https://music.apple.com' } }
+                            );
+                            if (!resp.ok) return { error: resp.status };
+                            return await resp.json();
+                        }""",
+                        {"storefront": storefront, "playlistId": playlist_id, "offset": offset, "limit": limit},
+                    )
+                    if not batch or batch.get("error"):
+                        raise RuntimeError(f"amp-api request failed inside browser: {batch}")
+                    batch_items = batch.get("data", [])
+                    items.extend(batch_items)
+                    if len(batch_items) < limit:
+                        break
+                    offset += limit
+            finally:
+                browser.close()
+    except RuntimeError:
+        raise
+    except Exception as e:
+        msg = str(e)
+        if "Executable doesn't exist" in msg or "chromium" in msg.lower():
+            raise RuntimeError(
+                "Chromium isn't installed for Playwright. Run:\n"
+                "  uv run playwright install chromium\n"
+                f"(underlying error: {e})"
+            ) from e
+        raise RuntimeError(
+            f"Browser scrape failed: {e}\n"
+            "If Chromium is missing, run: uv run playwright install chromium"
+        ) from e
 
     tracks = _tracks_from_amp_items(items)
     if not tracks:

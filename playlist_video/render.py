@@ -2,21 +2,17 @@
 
 import os
 import subprocess
+from threading import Event
 from typing import List, Optional
 
-from .encoding import EncodeSettings, software_fallback_for, write_videofile
-from .frames import build_track_clip
-from .models import Track
-from .progress import make_queue_progress_logger, make_quiet_logger, make_worker_bar_logger
-from .transitions import apply_single_clip_transition
-
-
-def _pick_logger(quiet: bool, progress_queue, position: int, desc: str, track_index: int):
-    if quiet and progress_queue is not None:
-        return make_queue_progress_logger(progress_queue, position, desc, track_index)
-    if quiet:
-        return make_quiet_logger()
-    return make_worker_bar_logger(position, desc)
+from .encoding import (
+    EncodeSettings,
+    encode_frames_to_file,
+    software_fallback_for,
+)
+from .frames import build_track_renderer
+from .models import CancelledError, Track, check_cancelled
+from .transitions import iter_faded_frames
 
 
 def render_track_to_file(
@@ -32,16 +28,17 @@ def render_track_to_file(
     ffmpeg_threads: int = 2,
     progress_queue=None,
     quiet: bool = False,
+    cancel_event: Optional[Event] = None,
 ) -> Track:
     """
     Renders one track's clip (frames + transition + audio) straight to its
-    own finished mp4. Meant to run inside a ProcessPoolExecutor worker.
+    own finished mp4. Meant to run inside a ProcessPoolExecutor / thread worker.
     """
+    check_cancelled(cancel_event)
     desc = f"{track.artist} - {track.title}"[:60]
     position = position_pool.get()
     try:
-        logger = _pick_logger(quiet, progress_queue, position, desc, track.index)
-        if quiet and progress_queue is not None:
+        if progress_queue is not None:
             try:
                 progress_queue.put({
                     "type": "progress",
@@ -54,14 +51,46 @@ def render_track_to_file(
             except Exception:
                 pass
 
-        clip = build_track_clip(track, resolution, fps, track_bg, font_dir)
-        if transition_duration > 0:
-            clip = apply_single_clip_transition(clip, transition_duration)
+        make_frame, duration = build_track_renderer(track, resolution, track_bg, font_dir)
+        total_frames = max(1, int(round(duration * fps)))
+
+        def on_frame(current: int, total: int) -> None:
+            check_cancelled(cancel_event)
+            if progress_queue is None:
+                return
+            try:
+                progress_queue.put({
+                    "type": "progress",
+                    "slot_id": position,
+                    "track_index": track.index,
+                    "track_label": desc,
+                    "current": current,
+                    "total": total,
+                })
+            except Exception:
+                pass
+
+        def frame_iter():
+            for frame, _t, _i in iter_faded_frames(
+                make_frame, duration, fps, transition_duration,
+            ):
+                yield frame
 
         try:
-            write_videofile(
-                clip, out_path, encode, fps=fps, ffmpeg_threads=ffmpeg_threads, logger=logger,
+            encode_frames_to_file(
+                frame_iter(),
+                out_path,
+                encode,
+                resolution=resolution,
+                fps=fps,
+                audio_path=track.audio_path,
+                ffmpeg_threads=ffmpeg_threads,
+                total_frames=total_frames,
+                on_frame=on_frame,
+                cancel_event=cancel_event,
             )
+        except CancelledError:
+            raise
         except Exception as e:
             if encode.codec.startswith("libx"):
                 raise
@@ -71,9 +100,19 @@ def render_track_to_file(
                     f"  ! GPU encode failed for '{track.artist} - {track.title}' ({e}); "
                     f"retrying with {fallback.codec}..."
                 )
-            retry_logger = _pick_logger(quiet, progress_queue, position, desc, track.index)
-            write_videofile(
-                clip, out_path, fallback, fps=fps, ffmpeg_threads=ffmpeg_threads, logger=retry_logger,
+            check_cancelled(cancel_event)
+            # Rebuild iterator — previous consumption exhausted it.
+            encode_frames_to_file(
+                frame_iter(),
+                out_path,
+                fallback,
+                resolution=resolution,
+                fps=fps,
+                audio_path=track.audio_path,
+                ffmpeg_threads=ffmpeg_threads,
+                total_frames=total_frames,
+                on_frame=on_frame,
+                cancel_event=cancel_event,
             )
     finally:
         if progress_queue is not None:
@@ -92,11 +131,7 @@ def render_track_to_file(
 def concat_clips(clip_paths: List[str], output_path: str, workdir: str) -> None:
     """
     Losslessly stitches already-encoded per-track clips with ffmpeg's concat
-    demuxer (stream copy — no re-encode, no quality loss, effectively
-    instant). Safe specifically because every clip was produced by
-    render_track_to_file with identical codec, resolution, fps, pixel format,
-    and audio sample rate/channels, which is exactly what -c copy
-    concatenation requires to avoid glitches.
+    demuxer (stream copy — no re-encode).
     """
     list_path = os.path.join(workdir, "concat_list.txt")
     with open(list_path, "w", encoding="utf-8") as f:
@@ -111,10 +146,6 @@ def concat_clips(clip_paths: List[str], output_path: str, workdir: str) -> None:
 
 
 def _probe_duration_sec(path: str) -> float:
-    """Container duration of a rendered clip via ffprobe. Used for the
-    description's timestamps instead of the source audio durations, so the
-    times match the concatenated output exactly (encoder frame/audio-priming
-    rounding included)."""
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", path],
@@ -133,22 +164,17 @@ def format_timestamp(seconds: float) -> str:
 
 def write_description(entries, output_video_path: str) -> str:
     """
-    Writes a ready-to-paste tracklist for the video description, one line per
-    track in final-video order: 'song title - artist m:ss', where the time is
-    the track's start position in the concatenated video. `entries` is the
-    ordered list of (track, clip_path) pairs that actually made it into the
-    final video (failed/skipped tracks never appear, and their absence shifts
-    the later timestamps correctly since times come from the real clips).
-
-    Note: YouTube's automatic chapter detection requires the timestamp at the
-    START of each line and the first one to be 0:00 — if you want clickable
-    chapters rather than a plain tracklist, swap each line to
-    '{timestamp} {title} - {artist}' before pasting.
+    Writes a ready-to-paste YouTube chapter list, one line per track in
+    final-video order: '{timestamp} {title} - {artist}'. The first line is
+    always 0:00 so YouTube auto-detects chapters. `entries` is the ordered
+    list of (track, clip_path) pairs that made it into the final video
+    (failed/skipped tracks are omitted; later timestamps stay correct because
+    times come from the real rendered clips).
     """
     lines = []
     t = 0.0
     for track, clip_path in entries:
-        lines.append(f"{track.title} - {track.artist} {format_timestamp(t)}")
+        lines.append(f"{format_timestamp(t)} {track.title} - {track.artist}")
         t += _probe_duration_sec(clip_path)
     desc_path = os.path.splitext(output_video_path)[0] + "_description.txt"
     with open(desc_path, "w", encoding="utf-8") as f:

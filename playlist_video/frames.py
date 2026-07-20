@@ -1,5 +1,5 @@
 """Info-screen layout, static foreground layer, and the per-track frame
-generator (build_track_clip) that moviepy turns into a video clip."""
+renderer (build_track_renderer) that yields RGB frames for ffmpeg."""
 
 import math
 import os
@@ -91,7 +91,7 @@ def render_foreground_layer(track: Track, size, font_dir) -> dict:
     Everything that does NOT change over time and sits ON TOP of the background:
     artwork (with a proper soft drop shadow), plus title/artist/album text —
     baked in statically if it fits within the artwork's width, or handed back
-    as a separate full-width texture (for build_track_clip to marquee-scroll
+    as a separate full-width texture (for build_track_renderer to marquee-scroll
     per frame) if it doesn't.
     """
     layout = compute_layout(size, font_dir)
@@ -172,8 +172,11 @@ def render_foreground_layer(track: Track, size, font_dir) -> dict:
     }
 
 
-def build_track_clip(track: Track, resolution, fps, background_image, font_dir):
+def build_track_renderer(track: Track, resolution, background_image, font_dir):
     """
+    Build a per-track frame callable. Returns (make_frame, duration_sec) where
+    make_frame(t) -> HxWx3 uint8 RGB. Duration comes from ffprobe on the audio.
+
     Optimized frame generator. The per-frame costs, and what's done about them:
 
       1. Full-frame base copy (static-background path): at 4K that's a ~24MB
@@ -182,26 +185,22 @@ def build_track_clip(track: Track, resolution, fps, background_image, font_dir):
          alive across make_frame calls and, each frame, restore only the
          small rectangles the PREVIOUS frame dirtied (marquee strips +
          progress bar) from the pristine base, then blend the new overlays.
-         Safe because moviepy consumes each returned frame (pipes its bytes
-         to ffmpeg, or copies it inside the transition wrapper) before
-         requesting the next one, and correct for any call order/time since
-         every call first restores whatever was dirty.
+         Safe because the encode path consumes each returned frame (writes
+         bytes to ffmpeg) before requesting the next one.
 
       2. Full-frame uint16 composite (gradient path): the background moves
          every frame so the frame can't be reused, but the foreground's alpha
-         is zero outside the center block (artwork + shadow + text + bar) —
-         compositing is a no-op there. The uint16 blend math is restricted to
-         the foreground's bounding box; the rest of the frame is a plain
-         uint8 crop-copy of the precomputed oversized gradient.
+         is zero outside the center block — compositing is a no-op there.
 
       3. Per-frame overlays (marquee text, progress bar) are alpha-blended
          directly into the uint8 frame in numpy — no PIL RGBA/RGB round
          trips per frame.
     """
-    from moviepy.editor import AudioFileClip, VideoClip
+    from .encoding import probe_audio_duration
 
-    audio = AudioFileClip(track.audio_path)
-    duration = audio.duration
+    if not track.audio_path:
+        raise ValueError("track.audio_path is required to build a renderer")
+    duration = probe_audio_duration(track.audio_path)
     track.duration_sec = duration
 
     bg_kind, bg_payload = prepare_background(
@@ -364,8 +363,8 @@ def build_track_clip(track: Track, resolution, fps, background_image, font_dir):
 
         if dirty is not None:
             frame_state["dirty"] = dirty
-        return frame
+        # Return a copy so the encode pipe / fade transform can own the bytes
+        # without racing the reusable work buffer.
+        return frame if dirty is None else frame.copy()
 
-    clip = VideoClip(make_frame, duration=duration).set_fps(fps)
-    clip = clip.set_audio(audio)
-    return clip
+    return make_frame, duration
