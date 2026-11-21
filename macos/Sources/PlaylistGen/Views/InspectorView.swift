@@ -4,6 +4,11 @@ import SwiftUI
 struct InspectorView: View {
     @Environment(AppModel.self) private var model
 
+    private func dimensions(_ tier: RunSettings.Size) -> (Int, Int) {
+        let parts = RunSettings.resolution(model.settings.aspect, tier).split(separator: "x").compactMap { Int($0) }
+        return (parts[0], parts[1])
+    }
+
     var body: some View {
         @Bindable var model = model
         Form {
@@ -12,9 +17,17 @@ struct InspectorView: View {
             }
 
             Section("Video") {
-                Picker("Resolution", selection: $model.settings.resolution) {
-                    ForEach(RunSettings.resolutions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
+                Picker("Aspect Ratio", selection: $model.settings.aspect) {
+                    ForEach(RunSettings.Aspect.allCases) { aspect in
+                        Text(aspect.label).tag(aspect)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("16:10 fills a MacBook display edge to edge; YouTube shows it with thin side bars")
+                Picker("Size", selection: $model.settings.sizeTier) {
+                    ForEach(RunSettings.Size.allCases) { tier in
+                        let (w, h) = dimensions(tier)
+                        Text("\(tier.rawValue)  \(Text("\(w) × \(h)").foregroundStyle(.secondary))").tag(tier)
                     }
                 }
                 Picker("Frame Rate", selection: $model.settings.fps) {

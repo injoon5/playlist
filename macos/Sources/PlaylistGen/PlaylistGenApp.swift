@@ -29,18 +29,32 @@ struct PlaylistCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
+        CommandGroup(replacing: .saveItem) {
+            Button("Save a Copy…") {
+                if let output = model.run?.output { Panels.saveCopy(of: output) }
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(model.run?.output == nil)
+            Button("Show in Finder") {
+                if let output = model.run?.output {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: output.videoPath)])
+                }
+            }
+            .keyboardShortcut("r", modifiers: [.command, .option])
+            .disabled(model.run?.output == nil)
+        }
         CommandMenu("Playlist") {
-            Button("Load Tracks") { model.loadTracks() }
+            Button("Load Playlist") { model.loadTracks() }
                 .keyboardShortcut("l")
                 .disabled(model.environment == nil || model.run != nil || model.isLoading)
-            Button("Generate Video") { model.generate() }
+            Button("Generate Video") { model.requestGenerate() }
                 .keyboardShortcut(.return)
                 .disabled(!model.canGenerate)
             Divider()
-            Button("Select All Tracks") { model.setAllIncluded(true) }
+            Button("Select All Songs") { model.setAllIncluded(true) }
                 .keyboardShortcut("a", modifiers: [.command, .option])
                 .disabled(model.tracks.isEmpty || model.run != nil)
-            Button("Select No Tracks") { model.setAllIncluded(false) }
+            Button("Deselect All Songs") { model.setAllIncluded(false) }
                 .keyboardShortcut("a", modifiers: [.command, .option, .shift])
                 .disabled(model.tracks.isEmpty || model.run != nil)
             Divider()

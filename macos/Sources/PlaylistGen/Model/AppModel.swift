@@ -3,8 +3,8 @@ import Foundation
 import Observation
 import PlaylistRender
 
-struct TrackRow: Identifiable, Hashable {
-    let id = UUID()
+struct TrackRow: Identifiable, Hashable, Codable {
+    let id: UUID
     /// Metadata as shown and rendered (the user may edit it).
     var track: BridgeTrack
     /// Apple Music's metadata, used for the YouTube search.
@@ -12,6 +12,7 @@ struct TrackRow: Identifiable, Hashable {
     var included = true
 
     init(track: BridgeTrack) {
+        self.id = UUID()
         self.track = track
         self.original = track
     }
@@ -38,7 +39,13 @@ final class AppModel {
     var settings: RunSettings {
         didSet { if settings != oldValue { settings.save() } }
     }
-    var tracks: [TrackRow] = []
+    /// The song list (with edits and order) survives quitting.
+    var tracks: [TrackRow] = [] {
+        didSet { scheduleSessionSave() }
+    }
+    /// Set when Generate would overwrite an existing video; the view asks first.
+    var confirmReplacePath: String?
+    private var sessionSaveTask: Task<Void, Never>?
     /// The row the preview shows (the table's first selected row).
     var previewTrackID: TrackRow.ID?
     private(set) var loadState: LoadState = .idle
@@ -54,6 +61,40 @@ final class AppModel {
         let saved = RunSettings.load()
         hadSavedSettings = saved != nil
         settings = saved ?? RunSettings()
+        if let session = Self.loadSession() {
+            tracks = session
+            previewTrackID = session.first?.id
+        }
+    }
+
+    // MARK: - Session
+
+    private static var sessionURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Playlist Gen/session.json")
+    }
+
+    private static func loadSession() -> [TrackRow]? {
+        guard let data = try? Data(contentsOf: sessionURL) else { return nil }
+        return try? JSONDecoder().decode([TrackRow].self, from: data)
+    }
+
+    private func scheduleSessionSave() {
+        sessionSaveTask?.cancel()
+        let snapshot = tracks
+        sessionSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            let url = Self.sessionURL
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(snapshot).write(to: url, options: .atomic)
+        }
+    }
+
+    /// Default save location: ~/Movies/Playlist Gen.
+    static var defaultOutputPath: String {
+        FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
+            .appending(path: "Playlist Gen/Playlist Video.mp4").path
     }
 
     // MARK: - Backend
@@ -95,7 +136,10 @@ final class AppModel {
         if !hadSavedSettings && settings == RunSettings() {
             settings.apply(defaults)
         }
-        if settings.output.isEmpty { settings.output = env.defaultOutputPath }
+        // Save to ~/Movies by default rather than inside the repository.
+        if settings.output.isEmpty || settings.output == env.defaultOutputPath {
+            settings.output = Self.defaultOutputPath
+        }
         if settings.gpu != "h264" { settings.gpu = "auto" }  // legacy on/off values
         refreshBackgrounds()
     }
@@ -173,8 +217,10 @@ final class AppModel {
             for message in box.messages {
                 switch message {
                 case .tracks(let loaded):
-                    tracks = loaded.map { TrackRow(track: $0) }
-                    previewTrackID = tracks.first?.id
+                    tracks = Self.merge(loaded, into: tracks)
+                    if !tracks.contains(where: { $0.id == previewTrackID }) {
+                        previewTrackID = tracks.first?.id
+                    }
                     loadState = .idle
                     return
                 case .error(let message, _):
@@ -187,6 +233,28 @@ final class AppModel {
             let tail = box.log.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
             loadState = .failed(tail ?? "Loading stopped (exit \(status ?? -1)).")
         }
+    }
+
+    /// Reloading keeps your work: songs still in the playlist keep their
+    /// edits, selection and your order; new songs are added at the end.
+    static func merge(_ loaded: [BridgeTrack], into existing: [TrackRow]) -> [TrackRow] {
+        func key(_ t: BridgeTrack) -> String { "\(t.title)\u{1F}\(t.artist)\u{1F}\(t.album)" }
+        var fresh: [String: [BridgeTrack]] = [:]
+        for t in loaded { fresh[key(t), default: []].append(t) }
+        var kept: [TrackRow] = []
+        for row in existing {
+            guard var matches = fresh[key(row.original)], !matches.isEmpty else { continue }
+            matches.removeFirst()
+            fresh[key(row.original)] = matches
+            kept.append(row)
+        }
+        let added = loaded.filter { t in
+            guard var matches = fresh[key(t)], !matches.isEmpty else { return false }
+            matches.removeFirst()
+            fresh[key(t)] = matches
+            return true
+        }
+        return kept + added.map { TrackRow(track: $0) }
     }
 
     func cancelLoad() {
@@ -242,6 +310,18 @@ final class AppModel {
 
     var canGenerate: Bool { generateBlocker == nil }
 
+    var outputPath: String { settings.output.isEmpty ? Self.defaultOutputPath : settings.output }
+
+    /// Generate, asking first if a video is already at the save location.
+    func requestGenerate() {
+        guard canGenerate else { return }
+        if FileManager.default.fileExists(atPath: outputPath) {
+            confirmReplacePath = outputPath
+        } else {
+            generate()
+        }
+    }
+
     func generate() {
         guard canGenerate, let environment else { return }
         var selected = tracks.filter(\.included)
@@ -257,7 +337,7 @@ final class AppModel {
             return t
         }
         let size = settings.size
-        let output = settings.output.isEmpty ? environment.defaultOutputPath : settings.output
+        let output = settings.output.isEmpty ? Self.defaultOutputPath : settings.output
         let config = RunConfig(
             tracks: shown,
             searchTracks: search,

@@ -38,7 +38,7 @@ struct SetupView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
-                        model.generate()
+                        model.requestGenerate()
                     } label: {
                         // "film" sits on the text's centre line; "film.stack" rode high.
                         Label("Generate", systemImage: "film")
@@ -60,6 +60,18 @@ struct SetupView: View {
             }
             .navigationTitle("Playlist Gen")
             .navigationSubtitle(subtitle)
+            .alert(
+                "“\((model.confirmReplacePath.map { ($0 as NSString).lastPathComponent }) ?? "")” already exists. Do you want to replace it?",
+                isPresented: Binding(get: { model.confirmReplacePath != nil }, set: { if !$0 { model.confirmReplacePath = nil } })
+            ) {
+                Button("Replace", role: .destructive) {
+                    model.confirmReplacePath = nil
+                    model.generate()
+                }
+                Button("Cancel", role: .cancel) { model.confirmReplacePath = nil }
+            } message: {
+                Text("A video with the same name is already in that folder. Replacing it overwrites it when the new video is finished. You can pick another name under Save To.")
+            }
     }
 
     private var subtitle: String {
@@ -199,7 +211,9 @@ private struct StatusBar: View {
         @Bindable var model = model
         HStack(spacing: 12) {
             Button("Select All") { model.setAllIncluded(true) }
+                .disabled(model.includedCount == model.tracks.count)
             Button("Deselect All") { model.setAllIncluded(false) }
+                .disabled(model.includedCount == 0)
             Toggle("Shuffle", isOn: $model.settings.shuffle)
                 .toggleStyle(.checkbox)
                 .help("Shuffle the selected songs when generating, instead of using the list order")

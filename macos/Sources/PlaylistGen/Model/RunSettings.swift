@@ -18,11 +18,37 @@ struct RunSettings: Codable, Equatable {
     var extraBackgrounds: [String] = []
     var fastScrape = false
 
-    static let resolutions: [(label: String, value: String)] = [
-        ("1080p", "1920x1080"),
-        ("1440p", "2560x1440"),
-        ("4K", "3840x2160"),
-    ]
+    enum Aspect: String, CaseIterable, Identifiable {
+        case wide = "16:9"
+        case macBook = "16:10"
+        var id: String { rawValue }
+        var label: String { self == .wide ? "16:9" : "16:10" }
+    }
+
+    enum Size: String, CaseIterable, Identifiable {
+        case hd = "1080p", qhd = "1440p", uhd = "4K"
+        var id: String { rawValue }
+        var width: Int { [.hd: 1920, .qhd: 2560, .uhd: 3840][self]! }
+    }
+
+    static func resolution(_ aspect: Aspect, _ size: Size) -> String {
+        let w = size.width
+        let h = aspect == .wide ? w * 9 / 16 : w * 10 / 16
+        return "\(w)x\(h)"
+    }
+
+    var aspect: Aspect {
+        get {
+            let (w, h) = self.size
+            return abs(Double(w) / Double(h) - 1.6) < 0.01 ? .macBook : .wide
+        }
+        set { resolution = Self.resolution(newValue, sizeTier) }
+    }
+
+    var sizeTier: Size {
+        get { Size.allCases.min { abs($0.width - size.width) < abs($1.width - size.width) } ?? .hd }
+        set { resolution = Self.resolution(aspect, newValue) }
+    }
 
     var size: (width: Int, height: Int) {
         let parts = resolution.lowercased().split(separator: "x").compactMap { Int($0) }

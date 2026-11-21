@@ -109,6 +109,29 @@ enum Panels {
         return panel.runModal() == .OK ? panel.url?.path : nil
     }
 
+    /// Save another copy of a finished video (and its chapters file).
+    static func saveCopy(of output: RunModel.Output) {
+        let source = URL(fileURLWithPath: output.videoPath)
+        let panel = NSSavePanel()
+        panel.title = "Save a Copy"
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = source.lastPathComponent
+        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let dest = panel.url, dest.standardizedFileURL != source.standardizedFileURL else { return }
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }  // the panel already asked
+            try fm.copyItem(at: source, to: dest)
+            let chapters = dest.deletingPathExtension().path + "_description.txt"
+            try? fm.removeItem(atPath: chapters)
+            try? fm.copyItem(atPath: output.descriptionPath, toPath: chapters)
+            NSWorkspace.shared.activateFileViewerSelecting([dest])
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     static func chooseImages() -> [String] {
         let panel = NSOpenPanel()
         panel.title = "Add Background Images"

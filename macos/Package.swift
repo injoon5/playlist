@@ -9,6 +9,10 @@ let package = Package(
         .executable(name: "render-frame", targets: ["RenderFrame"]),
         .library(name: "PlaylistRender", targets: ["PlaylistRender"]),
     ],
+    dependencies: [
+        // Progress bar on the Dock icon while rendering.
+        .package(url: "https://github.com/sindresorhus/DockProgress", from: "4.1.0"),
+    ],
     targets: [
         // Frame drawing (Core Graphics + Core Image on Metal) and AVFoundation/VideoToolbox
         // encoding — a port of playlist_video/frames.py, backgrounds.py, text.py, transitions.py.
@@ -19,7 +23,7 @@ let package = Package(
         // The AppKit + SwiftUI app.
         .executableTarget(
             name: "PlaylistGen",
-            dependencies: ["PlaylistRender"],
+            dependencies: ["PlaylistRender", "DockProgress"],
             path: "Sources/PlaylistGen"
         ),
         // Renders single frames to PNG (or a whole clip), for checking the look against the Python renderer.

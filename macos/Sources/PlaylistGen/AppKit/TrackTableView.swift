@@ -50,6 +50,7 @@ struct TrackTableView: NSViewRepresentable {
         table.delegate = coordinator
         table.onToggle = { [weak coordinator] in coordinator?.toggleTargetRows() }
         table.onEdit = { [weak coordinator] in coordinator?.editSelected() }
+        table.onCopy = { [weak coordinator] in coordinator?.copySelected() }
         table.registerForDraggedTypes([.playlistTrackRow])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.target = coordinator
@@ -70,6 +71,7 @@ struct TrackTableView: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        coordinator.undoManager = context.environment.undoManager
         guard coordinator.rows != rows, let table = coordinator.table else { return }
         let sameRows = coordinator.rows.map(\.id) == rows.map(\.id)
         coordinator.rows = rows
@@ -95,6 +97,27 @@ struct TrackTableView: NSViewRepresentable {
         var parent: TrackTableView
         var rows: [TrackRow] = []
         weak var table: NSTableView?
+        weak var undoManager: UndoManager?
+
+        /// Apply a change to the song list, undoable with ⌘Z.
+        private func commit(_ updated: [TrackRow], _ actionName: String) {
+            let previous = parent.rows
+            guard previous != updated else { return }
+            parent.rows = updated
+            undoManager?.registerUndo(withTarget: self) { coordinator in
+                MainActor.assumeIsolated { coordinator.commit(previous, actionName) }
+            }
+            undoManager?.setActionName(actionName)
+        }
+
+        func copySelected() {
+            guard let table else { return }
+            let lines = table.selectedRowIndexes.compactMap { $0 < rows.count ? rows[$0].track : nil }
+                .map { "\($0.title) — \($0.artist)" }
+            guard !lines.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        }
 
         init(_ parent: TrackTableView) { self.parent = parent }
 
@@ -202,7 +225,7 @@ struct TrackTableView: NSViewRepresentable {
             default: return
             }
             if updated[row] != parent.rows[row] {
-                parent.rows = updated
+                commit(updated, "Rename")
             } else {
                 // Unchanged, but put back the canonical value (e.g. after clearing).
                 table.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
@@ -232,7 +255,7 @@ struct TrackTableView: NSViewRepresentable {
                 t.index = updated[i].track.index
                 updated[i].track = t
             }
-            parent.rows = updated
+            commit(updated, "Revert to Apple Music Info")
         }
 
         // MARK: Including / excluding
@@ -249,7 +272,7 @@ struct TrackTableView: NSViewRepresentable {
         private func setIncluded(_ included: Bool, rows indexes: IndexSet) {
             var updated = parent.rows
             for i in indexes where i < updated.count { updated[i].included = included }
-            parent.rows = updated
+            commit(updated, included ? "Include" : "Exclude")
         }
 
         @objc func checkboxClicked(_ sender: NSButton) {
@@ -345,7 +368,7 @@ struct TrackTableView: NSViewRepresentable {
             var updated = parent.rows
             updated.move(fromOffsets: indexes, toOffset: destination)
             rows = updated
-            parent.rows = updated
+            commit(updated, "Move")
             table.reloadData()
             table.selectRowIndexes(
                 IndexSet(updated.indices.filter { moved.contains(updated[$0].id) }), byExtendingSelection: false
@@ -358,6 +381,12 @@ struct TrackTableView: NSViewRepresentable {
 final class TrackNSTableView: NSTableView {
     var onToggle: (() -> Void)?
     var onEdit: (() -> Void)?
+    var onCopy: (() -> Void)?
+
+    /// Edit › Copy: "Title — Artist" per selected song.
+    @objc func copy(_ sender: Any?) {
+        onCopy?()
+    }
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

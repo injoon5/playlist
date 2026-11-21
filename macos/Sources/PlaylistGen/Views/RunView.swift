@@ -32,6 +32,12 @@ struct RunView: View {
             } else {
                 if let output = run.output {
                     ToolbarItem(placement: .primaryAction) {
+                        ShareLink(item: URL(fileURLWithPath: output.videoPath)) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .help("Share the video with AirDrop, Messages, Mail, and more")
+                    }
+                    ToolbarItem(placement: .primaryAction) {
                         Button {
                             showChapters.toggle()
                         } label: {
@@ -131,6 +137,8 @@ private struct RunHeader: View {
                         Button("Show in Finder") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: output.videoPath)])
                         }
+                        Button("Save a Copy…") { Panels.saveCopy(of: output) }
+                            .help("Save another copy of the video and its chapters (⇧⌘S)")
                         Button("Play") {
                             NSWorkspace.shared.open(URL(fileURLWithPath: output.videoPath))
                         }
@@ -255,10 +263,12 @@ private struct SongProgressRow: View {
                 ProgressView(value: fraction)
                     .frame(width: 110)
                     .controlSize(.small)
-                Text("\(Int(fraction * 100))%")
+                Text(fraction, format: .percent.precision(.fractionLength(0)))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .frame(width: 36, alignment: .trailing)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(minWidth: 42, alignment: .trailing)
             }
             .help(text)
         } else {

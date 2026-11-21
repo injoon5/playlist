@@ -75,6 +75,30 @@ struct ProgressTests {
         #expect(p.value == 1)
     }
 
+    @Test func aspectAndSizeMapToResolutions() {
+        var s = RunSettings()
+        s.aspect = .macBook
+        #expect(s.resolution == "1920x1200")
+        s.sizeTier = .uhd
+        #expect(s.resolution == "3840x2400")
+        s.aspect = .wide
+        #expect(s.resolution == "3840x2160" && s.sizeTier == .uhd)
+    }
+
+    @Test @MainActor func reloadKeepsEditsOrderAndSelection() {
+        func t(_ title: String) -> BridgeTrack { BridgeTrack(index: nil, title: title, artist: "A", album: "", artworkUrl: nil, durationMs: nil) }
+        var b = TrackRow(track: t("B"))
+        b.track.title = "B (edited)"
+        b.included = false
+        let a = TrackRow(track: t("A"))
+        // User order: B, A. Reloaded playlist: A, B, C (C is new).
+        let merged = AppModel.merge([t("A"), t("B"), t("C")], into: [b, a])
+        #expect(merged.map(\.original.title) == ["B", "A", "C"])
+        #expect(merged[0].track.title == "B (edited)" && merged[0].included == false)
+        // A song removed from the playlist drops out.
+        #expect(AppModel.merge([t("A")], into: [b, a]).map(\.original.title) == ["A"])
+    }
+
     @Test func settingsParseResolution() {
         var s = RunSettings()
         s.resolution = "3840x2160"

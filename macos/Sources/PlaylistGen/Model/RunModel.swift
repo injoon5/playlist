@@ -1,7 +1,9 @@
 import AppKit
+import DockProgress
 import Foundation
 import Observation
 import PlaylistRender
+import UserNotifications
 
 /// Inputs for one generation run, frozen when the user presses Generate.
 struct RunConfig: Sendable {
@@ -150,6 +152,7 @@ final class RunModel {
 
     /// App is quitting: stop everything right away.
     func shutdown() {
+        DockProgress.resetProgress()
         cancelFlag.cancel()
         bridge?.terminate()
         guard isActive else { return }
@@ -160,6 +163,13 @@ final class RunModel {
     // MARK: - Pipeline
 
     private func run() async {
+        // Keep the Mac awake (but let the display sleep) while rendering.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled], reason: "Rendering a playlist video"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        DockProgress.style = .bar
+        Notifier.requestPermission()
         append(.info, "Rendering \(config.tracks.count) track(s) at \(config.width)×\(config.height), \(config.fps) fps")
         do {
             try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
@@ -194,8 +204,19 @@ final class RunModel {
         finishedAt = Date()
         slots.removeAll()
         bridge = nil
-        NSApp.dockTile.badgeLabel = nil
-        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+        if state == .finished {
+            DockProgress.progress = 1  // animates to full, then shows the plain icon
+        } else {
+            DockProgress.resetProgress()
+        }
+        if !NSApp.isActive {
+            NSApp.requestUserAttention(.informationalRequest)
+            switch state {
+            case .finished: Notifier.post(title: "Video Ready", body: URL(fileURLWithPath: config.output).lastPathComponent)
+            case .failed(let message): Notifier.post(title: "Couldn’t Finish the Video", body: message)
+            default: break
+            }
+        }
     }
 
     private func checkCancelled() throws {
@@ -414,11 +435,12 @@ final class RunModel {
         log.append(LogLine(id: log.count, kind: kind, text: text))
     }
 
+    /// Progress bar on the Dock icon (DockProgress), updated per percent.
     private func updateBadge() {
         let percent = Int(progress.value * 100)
         guard percent != lastBadge else { return }
         lastBadge = percent
-        NSApp.dockTile.badgeLabel = "\(percent)%"
+        DockProgress.progress = max(0.001, progress.value)
     }
 
     /// Delete downloads, artwork and clips. yt-dlp may still be flushing a
@@ -437,5 +459,28 @@ final class RunModel {
         let fm = FileManager.default
         try? fm.removeItem(atPath: config.output)
         try? fm.removeItem(atPath: (config.output as NSString).deletingPathExtension + "_description.txt")
+    }
+}
+
+/// "Video Ready" notifications when the app is in the background.
+@MainActor
+enum Notifier {
+    /// UserNotifications needs a real app bundle (not `swift run`).
+    private static var available: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") }
+
+    static func requestPermission() {
+        guard available else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    static func post(title: String, body: String) {
+        guard available else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
     }
 }
