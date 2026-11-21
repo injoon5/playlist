@@ -4,6 +4,27 @@ Turn an [Apple Music](https://music.apple.com) playlist into a YouTube-ready vid
 
 Scrapes the tracklist, downloads audio via yt-dlp (duration-checked against Apple Music when possible), renders album art + scrolling title cards, then stitches clips with ffmpeg. Optimized for macOS / Apple Silicon (VideoToolbox HEVC), with NVENC and libx264 fallbacks.
 
+## macOS app
+
+A native AppKit + SwiftUI app lives in `macos/` (macOS 27, Apple silicon recommended).
+Python still reads the playlist and downloads audio with yt-dlp; the app draws every
+frame with Core Graphics + Core Image on the GPU (Metal) and encodes with
+AVFoundation/VideoToolbox — no ffmpeg pipe.
+
+```bash
+macos/build-app.sh --open        # builds macos/build/Playlist Gen.app and launches it
+```
+
+- Paste a playlist link (or **Paste Link and Load**), pick / reorder / rename songs, then **Generate Video** (⌘↩).
+- Double-click a title, artist or album to edit it. Edits appear in the video and chapters;
+  the YouTube search keeps using Apple Music's original metadata.
+- The inspector shows a live preview drawn by the same renderer as the video.
+- Settings (⌘,) has the video format (HEVC / H.264), concurrency, and where the Python project and `uv` live.
+- `macos/Resources/AppIcon.icon` is an Icon Composer document.
+
+Developer bits: `swift test --package-path macos` runs the tests;
+`swift run --package-path macos render-frame --help` renders single frames or a whole clip.
+
 ## Requirements
 
 ```bash
@@ -56,7 +77,8 @@ playlist-gen/
 ├── app.py                          # TUI entry (uv run app.py)
 ├── apple_music_playlist_video.py   # headless CLI entry
 ├── pyproject.toml                  # deps + playlist-gen / playlist-gen-cli scripts
-├── playlist_video/                 # pipeline package
+├── macos/                          # AppKit + SwiftUI app, Swift renderer (PlaylistRender)
+├── playlist_video/                 # pipeline package (bridge.py = JSON-lines API for the app)
 │   ├── config.py                   #   user-editable defaults
 │   ├── models.py                   #   Track / PipelineConfig / progress / cancel
 │   ├── scraper.py                  #   Apple Music scraping (amp-api + Chromium)

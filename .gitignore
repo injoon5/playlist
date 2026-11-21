@@ -43,3 +43,8 @@ marquee_test.*
 *.swp
 *.swo
 *~
+
+# macOS app (macos/)
+macos/.build/
+macos/build/
+macos/.swiftpm/
