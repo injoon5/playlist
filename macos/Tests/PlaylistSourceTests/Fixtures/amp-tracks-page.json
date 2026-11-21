@@ -1,0 +1,16 @@
+{
+  "next": "/v1/catalog/us/playlists/pl.f4d106fed2bd41149aaacabb233eb5eb/tracks?offset=200",
+  "data": [
+    {
+      "id": "1800000100",
+      "type": "songs",
+      "attributes": {
+        "albumName": "Page Two",
+        "artistName": "Second Page Artist",
+        "artwork": { "height": 1400, "width": 1400, "url": "https://is1-ssl.mzstatic.com/image/thumb/p2/{w}x{h}bb.jpg" },
+        "durationInMillis": 201000,
+        "name": "Track 101"
+      }
+    }
+  ]
+}

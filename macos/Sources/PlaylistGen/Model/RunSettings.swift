@@ -1,6 +1,7 @@
 import Foundation
 
 /// Everything the user configures, persisted as one JSON blob in UserDefaults.
+/// Defaults match playlist_video/config.py.
 struct RunSettings: Codable, Equatable {
     var playlistURL = ""
     var output = ""
@@ -68,18 +69,19 @@ struct RunSettings: Codable, Equatable {
         }
     }
 
-    /// Seed from the Python project's playlist_video/config.py on first launch.
-    mutating func apply(_ d: BridgeDefaults) {
-        playlistURL = d.playlistUrl
-        output = d.output
-        resolution = d.resolution
-        fps = d.fps
-        workers = d.workers
-        renderWorkers = d.renderWorkers
-        gpu = d.gpu
-        shuffle = d.shuffle
-        transitionDuration = d.transitionDuration
-        backgrounds = d.backgroundImages
+    /// First-launch settings: the defaults from the Python project's
+    /// playlist_video/config.py (RESOLUTION 1920x1080, FPS 30, WORKERS 6,
+    /// RENDER_WORKERS 4, GPU auto, SHUFFLE off, TRANSITION_DURATION 0.6,
+    /// BACKGROUND_IMAGE bg1 + bg2). The output path is filled in by AppModel.
+    static func firstLaunch(backgroundsDir: URL?) -> RunSettings {
+        var settings = RunSettings()
+        settings.renderWorkers = 4
+        if let dir = backgroundsDir {
+            settings.backgrounds = ["bg1.jpeg", "bg2.jpeg"]
+                .map { dir.appending(path: $0).path }
+                .filter { FileManager.default.fileExists(atPath: $0) }
+        }
+        return settings
     }
 }
 

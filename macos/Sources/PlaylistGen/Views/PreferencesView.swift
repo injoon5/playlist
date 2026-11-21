@@ -1,3 +1,4 @@
+import PlaylistSource
 import SwiftUI
 
 /// Settings window (⌘,).
@@ -7,8 +8,8 @@ struct PreferencesView: View {
             Tab("Rendering", systemImage: "film") {
                 RenderingSettings()
             }
-            Tab("Backend", systemImage: "terminal") {
-                BackendSettings()
+            Tab("Tools", systemImage: "wrench.and.screwdriver") {
+                ToolsSettings()
             }
         }
         .frame(width: 520)
@@ -47,7 +48,7 @@ private struct RenderingSettings: View {
             Section {
                 Toggle("Try the fast playlist reader first", isOn: $model.settings.fastScrape)
             } footer: {
-                Text("Reads the playlist page directly and falls back to headless Chromium if that fails.")
+                Text("Reads the playlist page directly instead of opening it in a hidden web view first. Either way, the other reader is the fallback.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -55,81 +56,148 @@ private struct RenderingSettings: View {
     }
 }
 
-/// Where the Python project (scraping + yt-dlp) and uv live.
-private struct BackendSettings: View {
+/// yt-dlp, ffmpeg and deno: where they were found, overrides, and updating yt-dlp.
+private struct ToolsSettings: View {
     @Environment(AppModel.self) private var model
-    @AppStorage(ToolEnvironment.rootOverrideKey) private var rootOverride = ""
-    @AppStorage(ToolEnvironment.uvOverrideKey) private var uvOverride = ""
+
+    private var hasOverrides: Bool {
+        Tool.allCases.contains { !(UserDefaults.standard.string(forKey: $0.overrideKey) ?? "").isEmpty }
+    }
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Project folder") {
-                    HStack {
-                        PathControlView(path: rootOverride.isEmpty ? (model.environment?.projectRoot.path ?? "") : rootOverride)
-                        Button("Choose…") {
-                            Task {
-                                if let path = await Panels.chooseFolder(
-                                    message: "Choose the playlist-gen repository folder.",
-                                    current: model.environment?.projectRoot.path
-                                ) {
-                                    rootOverride = path
-                                    reconnect()
-                                }
-                            }
-                        }
-                    }
-                }
-                LabeledContent("uv") {
-                    HStack {
-                        Text(uvOverride.isEmpty ? (model.environment?.uv.path ?? "Not found") : uvOverride)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Button("Choose…") {
-                            Task {
-                                if let path = await Panels.chooseExecutable(message: "Choose the uv executable.") {
-                                    uvOverride = path
-                                    reconnect()
-                                }
-                            }
-                        }
-                    }
-                }
-                if !rootOverride.isEmpty || !uvOverride.isEmpty {
+                ToolRow(tool: .ytDlp, subtitle: model.ytDlpVersion.map { "Version \($0)" } ?? "Finds and downloads each song")
+                ToolRow(tool: .ffmpeg, subtitle: "Converts the downloaded audio")
+                ToolRow(tool: .deno, subtitle: "Runs YouTube’s player scripts for yt-dlp", alternative: .node)
+                if hasOverrides {
                     Button("Use Automatic Locations") {
-                        rootOverride = ""
-                        uvOverride = ""
-                        reconnect()
+                        for tool in Tool.allCases { UserDefaults.standard.removeObject(forKey: tool.overrideKey) }
+                        recheck()
                     }
                 }
             } footer: {
-                Text("Python reads the playlist and downloads audio with yt-dlp. This app draws and encodes the video.")
+                Text("Install all three with Homebrew: \(ToolPaths.installCommand)")
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
 
             Section {
                 HStack {
-                    if model.isConnecting {
+                    if model.isCheckingTools {
                         ProgressView().controlSize(.small)
-                        Text("Connecting…")
-                    } else if let error = model.environmentError {
+                        Text("Checking…")
+                    } else if let problem = model.toolProblem {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
-                        Text(error).lineLimit(3)
-                    } else if model.environment != nil {
+                            .accessibilityHidden(true)
+                        Text(problem.localizedDescription).lineLimit(4)
+                    } else if model.tools != nil {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                        Text("Connected")
+                            .accessibilityHidden(true)
+                        Text("Ready to download")
                     }
                     Spacer()
-                    Button("Reconnect", action: reconnect)
-                        .disabled(model.isConnecting)
+                    Button("Check Again", action: recheck)
+                        .disabled(model.isCheckingTools)
+                }
+                HStack {
+                    switch model.ytDlpUpdate {
+                    case .idle:
+                        Text("YouTube changes often. If songs stop downloading, update yt-dlp.")
+                            .foregroundStyle(.secondary)
+                    case .running:
+                        ProgressView().controlSize(.small)
+                        Text("Updating yt-dlp…")
+                    case .finished(let output):
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                            .accessibilityHidden(true)
+                        Text(output.isEmpty ? "yt-dlp is up to date." : output).lineLimit(3).textSelection(.enabled)
+                    case .failed(let message):
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                            .accessibilityHidden(true)
+                        Text(message).lineLimit(4).textSelection(.enabled)
+                    }
+                    Spacer()
+                    Button("Update yt-dlp") { Task { await model.updateYtDlp() } }
+                        .disabled(model.toolSearch?.ytDlp == nil || model.ytDlpUpdate == .running || model.run?.isActive == true)
+                        .help(updateHelp)
                 }
             }
         }
         .formStyle(.grouped)
     }
 
-    private func reconnect() {
-        Task { await model.connect() }
+    private var updateHelp: String {
+        guard let ytDlp = model.toolSearch?.ytDlp else { return "yt-dlp isn’t installed" }
+        return "Runs “\(ToolUpdater.updateCommand(for: ytDlp).display)”"
+    }
+
+    private func recheck() {
+        Task { await model.checkTools() }
+    }
+}
+
+/// One tool: where it is (and how it was found), with a Choose… override.
+private struct ToolRow: View {
+    @Environment(AppModel.self) private var model
+    let tool: Tool
+    let subtitle: String
+    /// Shown when `tool` is missing but this one can stand in (node for deno).
+    var alternative: Tool?
+    @AppStorage private var override: String
+
+    init(tool: Tool, subtitle: String, alternative: Tool? = nil) {
+        self.tool = tool
+        self.subtitle = subtitle
+        self.alternative = alternative
+        _override = AppStorage(wrappedValue: "", tool.overrideKey)
+    }
+
+    private var located: LocatedTool? { model.toolSearch?.located[tool] }
+
+    private var status: (path: String, detail: String?) {
+        if let bad = model.toolSearch?.invalidOverrides[tool] {
+            return (bad, "Not an executable")
+        }
+        if let located {
+            return (located.path, located.source.rawValue)
+        }
+        if let alternative, let other = model.toolSearch?.located[alternative] {
+            return ("Not found", "yt-dlp will use \(alternative.rawValue) at \(other.path)")
+        }
+        return ("Not found", nil)
+    }
+
+    var body: some View {
+        LabeledContent {
+            HStack {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(status.path)
+                        .foregroundStyle(located == nil ? .red : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    if let detail = status.detail {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Button("Choose…") {
+                    Task {
+                        if let path = await Panels.chooseExecutable(message: "Choose the \(tool.rawValue) executable.", current: located?.path) {
+                            override = path
+                            await model.checkTools()
+                        }
+                    }
+                }
+                .accessibilityLabel("Choose \(tool.rawValue)")
+            }
+        } label: {
+            Text(tool.rawValue)
+            Text(subtitle)
+        }
     }
 }

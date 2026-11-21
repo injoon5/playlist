@@ -1,0 +1,79 @@
+{
+  "data": [
+    {
+      "id": "pl.f4d106fed2bd41149aaacabb233eb5eb",
+      "type": "playlists",
+      "href": "/v1/catalog/us/playlists/pl.f4d106fed2bd41149aaacabb233eb5eb",
+      "attributes": {
+        "name": "Today’s Hits",
+        "curatorName": "Apple Music Pop",
+        "artwork": { "width": 4320, "height": 1080, "url": "https://is1-ssl.mzstatic.com/image/thumb/Features/{w}x{h}cc.jpg" }
+      },
+      "relationships": {
+        "curator": { "href": "/v1/catalog/us/playlists/pl.f4d106fed2bd41149aaacabb233eb5eb/curator", "data": [] },
+        "tracks": {
+          "href": "/v1/catalog/us/playlists/pl.f4d106fed2bd41149aaacabb233eb5eb/tracks",
+          "next": "/v1/catalog/us/playlists/pl.f4d106fed2bd41149aaacabb233eb5eb/tracks?offset=100",
+          "data": [
+            {
+              "id": "1889992115",
+              "type": "songs",
+              "href": "/v1/catalog/us/songs/1889992115",
+              "attributes": {
+                "albumName": "you seem pretty sad for a girl so in love",
+                "artistName": "Olivia Rodrigo",
+                "artwork": {
+                  "bgColor": "7c939f", "hasP3": false, "height": 4000, "width": 4000,
+                  "textColor1": "070605", "textColor2": "141413", "textColor3": "1e2224", "textColor4": "282d2f",
+                  "url": "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/1d/1b/f9/26UMGIM39303.rgb.jpg/{w}x{h}bb.jpg"
+                },
+                "discNumber": 1,
+                "durationInMillis": 209680,
+                "genreNames": ["Pop", "Music"],
+                "hasLyrics": true,
+                "isrc": "USUG12600001",
+                "name": "stupid song",
+                "playParams": { "id": "1889992115", "kind": "song" },
+                "previews": [{ "url": "https://audio-ssl.itunes.apple.com/preview.m4a" }],
+                "releaseDate": "2026-11-13",
+                "trackNumber": 3,
+                "url": "https://music.apple.com/us/song/stupid-song/1889992115"
+              }
+            },
+            {
+              "id": "1700000001",
+              "type": "songs",
+              "href": "/v1/catalog/us/songs/1700000001",
+              "attributes": {
+                "albumName": "Palette",
+                "artistName": "아이유 (IU)",
+                "artwork": { "height": 600, "width": 600, "url": "https://is1-ssl.mzstatic.com/image/thumb/Music/palette.jpg/{w}x{h}bb.jpg" },
+                "durationInMillis": 253000,
+                "name": "밤편지"
+              }
+            },
+            {
+              "id": "1700000002",
+              "type": "music-videos",
+              "href": "/v1/catalog/us/music-videos/1700000002",
+              "attributes": {
+                "artistName": "Someone",
+                "name": "A Video Without Album or Artwork"
+              }
+            },
+            {
+              "id": "1700000003",
+              "type": "songs",
+              "href": "/v1/catalog/us/songs/1700000003",
+              "attributes": {
+                "albumName": "No Size",
+                "artwork": { "url": "https://example.mzstatic.com/nosize/{w}x{h}bb.jpg" },
+                "durationInMillis": 180000
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

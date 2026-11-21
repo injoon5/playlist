@@ -4,9 +4,10 @@
 #   macos/build-app.sh            # release build
 #   macos/build-app.sh --open     # build, then launch
 #
-# The bundle records this repository's path (PlaylistGenProjectRoot) so the
-# app finds the Python backend wherever you move the .app. Override it in
-# the app's Settings (⌘,) if you move the repository.
+# The app is self-contained: it reads playlists and drives yt-dlp / ffmpeg
+# itself (no Python), and the sample backgrounds from assets/backgrounds are
+# copied into Contents/Resources/Backgrounds. It needs the command-line tools
+# at run time:  brew install yt-dlp ffmpeg deno
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -19,6 +20,10 @@ bin="$(swift build --package-path "$here" -c release --show-bin-path)/PlaylistGe
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/PlaylistGen"
+
+# Sample backgrounds for the Background picker.
+mkdir -p "$app/Contents/Resources/Backgrounds"
+cp "$repo"/assets/backgrounds/* "$app/Contents/Resources/Backgrounds/"
 
 # App icon: compile the Icon Composer document (Resources/AppIcon.icon) into
 # Assets.car (Liquid Glass renditions) + AppIcon.icns.
@@ -47,7 +52,6 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticTermination</key><false/>
-    <key>PlaylistGenProjectRoot</key><string>$repo</string>
 </dict>
 </plist>
 PLIST

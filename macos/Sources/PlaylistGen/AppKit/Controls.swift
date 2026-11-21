@@ -152,18 +152,9 @@ enum Panels {
         return await present(panel) ? panel.urls.map(\.path) : []
     }
 
-    static func chooseFolder(message: String, current: String?) async -> String? {
-        let panel = NSOpenPanel()
-        panel.message = message
-        panel.prompt = "Choose"
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if let current { panel.directoryURL = URL(fileURLWithPath: current) }
-        return await present(panel) ? panel.url?.path : nil
-    }
-
-    static func chooseExecutable(message: String) async -> String? {
+    /// A command-line tool (Settings › Tools). Starts in the folder of the
+    /// current one, else Homebrew's bin folder.
+    static func chooseExecutable(message: String, current: String?) async -> String? {
         let panel = NSOpenPanel()
         panel.message = message
         panel.prompt = "Choose"
@@ -171,6 +162,9 @@ enum Panels {
         panel.canChooseDirectories = false
         panel.treatsFilePackagesAsDirectories = true
         panel.showsHiddenFiles = true
+        let start = current.map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
+            ?? URL(fileURLWithPath: "/opt/homebrew/bin")
+        panel.directoryURL = start
         return await present(panel) ? panel.url?.path : nil
     }
 }

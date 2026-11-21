@@ -2,16 +2,17 @@ import AppKit
 import Foundation
 import Observation
 import PlaylistRender
+import PlaylistSource
 
 struct TrackRow: Identifiable, Hashable, Codable {
     let id: UUID
     /// Metadata as shown and rendered (the user may edit it).
-    var track: BridgeTrack
+    var track: PlaylistTrack
     /// Apple Music's metadata, used for the YouTube search.
-    let original: BridgeTrack
+    let original: PlaylistTrack
     var included = true
 
-    init(track: BridgeTrack) {
+    init(track: PlaylistTrack) {
         self.id = UUID()
         self.track = track
         self.original = track
@@ -28,11 +29,17 @@ enum LoadState: Equatable {
 
 @MainActor @Observable
 final class AppModel {
-    // Backend
-    private(set) var environment: ToolEnvironment?
-    private(set) var environmentError: String?
-    private(set) var isConnecting = false
-    private(set) var backgroundsDir: URL?
+    // Tools (yt-dlp, ffmpeg, deno/node)
+    /// Set once yt-dlp and ffmpeg are found and yt-dlp runs.
+    private(set) var tools: ToolPaths?
+    /// The latest search, even when something required is missing (Settings shows it).
+    private(set) var toolSearch: ToolPaths?
+    private(set) var toolProblem: ToolProblem?
+    private(set) var isCheckingTools = false
+    private(set) var ytDlpVersion: String?
+    private(set) var ytDlpUpdate: ToolUpdateState = .idle
+    /// Bundled sample backgrounds (Contents/Resources/Backgrounds in the app).
+    let backgroundsDir: URL? = BundledBackgrounds.directory
     private(set) var backgroundCandidates: [String] = []
 
     // Setup
@@ -49,8 +56,7 @@ final class AppModel {
     /// The row the preview shows (the table's first selected row).
     var previewTrackID: TrackRow.ID?
     private(set) var loadState: LoadState = .idle
-    private var fetchProcess: BridgeProcess?
-    private let hadSavedSettings: Bool
+    private var fetchTask: Task<Void, Never>?
 
     // Run
     private(set) var run: RunModel?
@@ -58,13 +64,18 @@ final class AppModel {
     static let imageExtensions: Set<String> = ["jpeg", "jpg", "png", "webp", "gif", "bmp", "heic", "tiff"]
 
     init() {
-        let saved = RunSettings.load()
-        hadSavedSettings = saved != nil
-        settings = saved ?? RunSettings()
+        var settings = RunSettings.load() ?? RunSettings.firstLaunch(backgroundsDir: BundledBackgrounds.directory)
+        // Save to ~/Movies by default (older versions saved inside the repository).
+        if settings.output.isEmpty || settings.output.hasSuffix("/output/playlist_video.mp4") {
+            settings.output = Self.defaultOutputPath
+        }
+        if settings.gpu != "h264" { settings.gpu = "auto" }  // legacy on/off values
+        self.settings = settings
         if let session = Self.loadSession() {
             tracks = session
             previewTrackID = session.first?.id
         }
+        refreshBackgrounds()
     }
 
     // MARK: - Session
@@ -97,51 +108,46 @@ final class AppModel {
             .appending(path: "Playlist Gen/Playlist Video.mp4").path
     }
 
-    // MARK: - Backend
+    // MARK: - Tools
 
-    /// Locate the Python project + uv, then read its defaults (also warms up
-    /// `uv run`, which syncs the venv on first use).
-    func connect() async {
-        guard !isConnecting else { return }
-        isConnecting = true
-        defer { isConnecting = false }
-        environmentError = nil
-        let env: ToolEnvironment
+    /// Look for yt-dlp, ffmpeg and deno/node, and make sure yt-dlp runs.
+    /// Quick: a few file checks plus `yt-dlp --version`.
+    func checkTools() async {
+        guard !isCheckingTools else { return }
+        isCheckingTools = true
+        defer { isCheckingTools = false }
+        let found = ToolLocator.standard().locate()
+        toolSearch = found
+        if let problem = found.problem {
+            tools = nil
+            toolProblem = problem
+            ytDlpVersion = nil
+            return
+        }
         do {
-            env = try ToolEnvironment.resolve()
+            ytDlpVersion = try await ToolUpdater.ytDlpVersion(found)
+            tools = found
+            toolProblem = nil
+        } catch let problem as ToolProblem {
+            tools = nil
+            toolProblem = problem
         } catch {
-            environment = nil
-            environmentError = error.localizedDescription
-            return
+            tools = nil
+            toolProblem = .broken(.ytDlp, error.localizedDescription)
         }
+    }
 
-        let process = BridgeProcess(environment: env, arguments: ["defaults"])
-        let box = MessageBox()
-        let status = try? await process.run(
-            onMessage: { box.messages.append($0) },
-            onLog: { box.log.append($0) }
-        )
-        guard let defaults = box.messages.lazy.compactMap({ message -> BridgeDefaults? in
-            if case .defaults(let d) = message { return d }
-            return nil
-        }).first else {
-            environment = nil
-            let tail = box.log.suffix(6).joined(separator: "\n")
-            environmentError = "The Python backend didn’t start (exit status \(status ?? -1)).\n\(tail)"
-            return
+    /// Settings › Tools › Update yt-dlp: `brew upgrade yt-dlp` or `yt-dlp -U`.
+    func updateYtDlp() async {
+        guard let found = toolSearch, found.ytDlp != nil, ytDlpUpdate != .running else { return }
+        ytDlpUpdate = .running
+        do {
+            let output = try await ToolUpdater.updateYtDlp(found)
+            await checkTools()
+            ytDlpUpdate = .finished(output)
+        } catch {
+            ytDlpUpdate = .failed(error.localizedDescription)
         }
-
-        environment = env
-        backgroundsDir = URL(fileURLWithPath: defaults.backgroundsDir)
-        if !hadSavedSettings && settings == RunSettings() {
-            settings.apply(defaults)
-        }
-        // Save to ~/Movies by default rather than inside the repository.
-        if settings.output.isEmpty || settings.output == env.defaultOutputPath {
-            settings.output = Self.defaultOutputPath
-        }
-        if settings.gpu != "h264" { settings.gpu = "auto" }  // legacy on/off values
-        refreshBackgrounds()
     }
 
     func refreshBackgrounds() {
@@ -156,7 +162,12 @@ final class AppModel {
         let extras = settings.extraBackgrounds.filter { fm.fileExists(atPath: $0) && !found.contains($0) }
         backgroundCandidates = found + extras
         let available = Set(backgroundCandidates)
-        let kept = settings.backgrounds.filter { available.contains($0) }
+        // Selections made when the samples came from the repository's
+        // assets/backgrounds (or from a moved app) map to the bundled copies.
+        let kept = settings.backgrounds.compactMap { path -> String? in
+            if available.contains(path) { return path }
+            return BundledBackgrounds.equivalent(of: path, in: found)
+        }
         if kept != settings.backgrounds { settings.backgrounds = kept }
     }
 
@@ -198,40 +209,27 @@ final class AppModel {
             loadState = .failed("That doesn’t look like an Apple Music link (music.apple.com/…/playlist/…).")
             return
         }
-        guard let environment, run == nil else { return }
-        fetchProcess?.terminate()
-        var arguments = ["fetch", url]
-        if settings.fastScrape { arguments.append("--fast-scrape") }
-        let process = BridgeProcess(environment: environment, arguments: arguments)
-        fetchProcess = process
+        guard tools != nil, run == nil else { return }
+        fetchTask?.cancel()
         loadState = .loading
+        let fastFirst = settings.fastScrape
 
-        Task {
-            let box = MessageBox()
-            let status = try? await process.run(
-                onMessage: { box.messages.append($0) },
-                onLog: { box.log.append($0) }
-            )
-            guard fetchProcess === process else { return }  // superseded or cancelled
-            fetchProcess = nil
-            for message in box.messages {
-                switch message {
-                case .tracks(let loaded):
-                    tracks = Self.merge(loaded, into: tracks)
-                    if !tracks.contains(where: { $0.id == previewTrackID }) {
-                        previewTrackID = tracks.first?.id
-                    }
-                    loadState = .idle
-                    return
-                case .error(let message, _):
-                    loadState = .failed(message)
-                    return
-                default:
-                    continue
+        // Web view first by default (like the Python default of headless
+        // Chromium), the fast reader first if that setting is on; each falls
+        // back to the other.
+        fetchTask = Task {
+            do {
+                let loaded = try await PlaylistScraper.fetchTracks(url, fastFirst: fastFirst)
+                guard !Task.isCancelled else { return }
+                tracks = Self.merge(loaded, into: tracks)
+                if !tracks.contains(where: { $0.id == previewTrackID }) {
+                    previewTrackID = tracks.first?.id
                 }
+                loadState = .idle
+            } catch {
+                guard !Task.isCancelled else { return }  // superseded or stopped
+                loadState = .failed(error.localizedDescription)
             }
-            let tail = box.log.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
-            loadState = .failed(tail ?? "Loading stopped (exit \(status ?? -1)).")
         }
     }
 
@@ -259,9 +257,9 @@ final class AppModel {
 
     /// Reloading keeps your work: songs still in the playlist keep their
     /// edits, selection and your order; new songs are added at the end.
-    static func merge(_ loaded: [BridgeTrack], into existing: [TrackRow]) -> [TrackRow] {
-        func key(_ t: BridgeTrack) -> String { "\(t.title)\u{1F}\(t.artist)\u{1F}\(t.album)" }
-        var fresh: [String: [BridgeTrack]] = [:]
+    static func merge(_ loaded: [PlaylistTrack], into existing: [TrackRow]) -> [TrackRow] {
+        func key(_ t: PlaylistTrack) -> String { "\(t.title)\u{1F}\(t.artist)\u{1F}\(t.album)" }
+        var fresh: [String: [PlaylistTrack]] = [:]
         for t in loaded { fresh[key(t), default: []].append(t) }
         var kept: [TrackRow] = []
         for row in existing {
@@ -280,8 +278,8 @@ final class AppModel {
     }
 
     func cancelLoad() {
-        fetchProcess?.terminate()
-        fetchProcess = nil
+        fetchTask?.cancel()
+        fetchTask = nil
         loadState = .idle
     }
 
@@ -311,7 +309,7 @@ final class AppModel {
         undoManager?.setActionName(actionName)
     }
 
-    var includedTracks: [BridgeTrack] { tracks.filter(\.included).map(\.track) }
+    var includedTracks: [PlaylistTrack] { tracks.filter(\.included).map(\.track) }
     var includedCount: Int { tracks.reduce(0) { $0 + ($1.included ? 1 : 0) } }
     var includedDuration: Double {
         tracks.filter(\.included).reduce(0) { $0 + Double($1.track.durationMs ?? 0) / 1000 }
@@ -341,7 +339,7 @@ final class AppModel {
     // MARK: - Generate
 
     var generateBlocker: String? {
-        if environment == nil { return "The Python backend isn’t connected." }
+        if tools == nil { return "yt-dlp and ffmpeg are needed to download songs." }
         if run != nil { return "A video is already being generated." }
         if isLoading { return "Wait for the playlist to finish loading." }
         if tracks.isEmpty { return "Load a playlist first." }
@@ -367,7 +365,7 @@ final class AppModel {
     }
 
     func generate() {
-        guard canGenerate, let environment else { return }
+        guard canGenerate, let tools else { return }
         var selected = tracks.filter(\.included)
         if settings.shuffle { selected.shuffle() }
         let shown = selected.enumerated().map { i, row in
@@ -391,15 +389,15 @@ final class AppModel {
             workers: settings.workers, renderWorkers: settings.renderWorkers,
             gpu: settings.gpu, transitionDuration: settings.transitionDuration
         )
-        let model = RunModel(config: config, environment: environment)
+        let model = RunModel(config: config, tools: tools)
         run = model
         model.start()
     }
 
     /// Run the same video again after a failure or a stop.
     func retryRun() {
-        guard let previous = run, !previous.isActive, let environment else { return }
-        let model = RunModel(config: previous.config, environment: environment)
+        guard let previous = run, !previous.isActive, let tools else { return }
+        let model = RunModel(config: previous.config, tools: tools)
         run = model
         model.start()
     }
@@ -410,14 +408,42 @@ final class AppModel {
     }
 
     func shutdown() {
-        fetchProcess?.terminate()
+        fetchTask?.cancel()
         run?.shutdown()
+        // yt-dlp, ffmpeg, brew: nothing outlives the app.
+        ProcessRegistry.shared.killAll()
     }
 }
 
-/// Collects bridge output on the main actor.
-@MainActor
-final class MessageBox {
-    var messages: [BridgeMessage] = []
-    var log: [String] = []
+enum ToolUpdateState: Equatable {
+    case idle, running, finished(String), failed(String)
+}
+
+/// The sample background images (assets/backgrounds in the repository).
+/// build-app.sh copies them into the app's Resources/Backgrounds; a
+/// `swift run` build uses the repository's folder.
+enum BundledBackgrounds {
+    static let directory: URL? = {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            candidates.append(resources.appending(path: "Backgrounds"))
+        }
+        // Development builds: <repo>/macos/Sources/PlaylistGen/Model/AppModel.swift -> <repo>/assets/backgrounds
+        var repo = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { repo = repo.deletingLastPathComponent() }
+        candidates.append(repo.appending(path: "assets/backgrounds"))
+        return candidates.first { url in
+            var isDir: ObjCBool = false
+            return fm.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+        }
+    }()
+
+    /// A bundled image with the same name as `path`, when `path` was one of
+    /// the samples from somewhere else (a repository checkout, an older app).
+    static func equivalent(of path: String, in bundled: [String]) -> String? {
+        let url = URL(fileURLWithPath: path)
+        guard url.deletingLastPathComponent().lastPathComponent.lowercased() == "backgrounds" else { return nil }
+        return bundled.first { ($0 as NSString).lastPathComponent == url.lastPathComponent }
+    }
 }

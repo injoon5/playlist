@@ -47,7 +47,7 @@ struct PlaylistCommands: Commands {
         CommandMenu("Playlist") {
             Button("Load Playlist") { model.loadTracks() }
                 .keyboardShortcut("l")
-                .disabled(model.environment == nil || model.run != nil || model.isLoading)
+                .disabled(model.tools == nil || model.run != nil || model.isLoading)
             Button("Generate Video") { model.requestGenerate() }
                 .keyboardShortcut(.return)
                 .disabled(!model.canGenerate)
@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var model: AppModel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Writing to a bridge whose process already exited must not kill the app.
+        // A broken pipe to a child process (yt-dlp, ffprobe) must not kill the app.
         signal(SIGPIPE, SIG_IGN)
         // Needed when launched as a bare executable (`swift run`).
         NSApp.setActivationPolicy(.regular)

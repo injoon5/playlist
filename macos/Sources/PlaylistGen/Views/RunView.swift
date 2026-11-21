@@ -1,4 +1,5 @@
 import AppKit
+import PlaylistSource
 import SwiftUI
 
 /// Progress for a run: a compact status header, the song list with inline
@@ -155,7 +156,7 @@ private struct RunHeader: View {
                     } else {
                         Button(run.state == .cancelled ? "Start Again" : "Try Again") { model.retryRun() }
                             .keyboardShortcut(.defaultAction)
-                            .disabled(model.environment == nil)
+                            .disabled(model.tools == nil)
                             .help("Generate the same video again")
                     }
                 }
@@ -250,7 +251,7 @@ private struct SongProgressList: View {
 
 private struct SongProgressRow: View {
     let row: RunModel.Row
-    let track: BridgeTrack?
+    let track: PlaylistTrack?
     let fraction: Double?
 
     var body: some View {

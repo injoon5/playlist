@@ -7,23 +7,36 @@ Scrapes the tracklist, downloads audio via yt-dlp (duration-checked against Appl
 ## macOS app
 
 A native AppKit + SwiftUI app lives in `macos/` (macOS 27, Apple silicon recommended).
-Python still reads the playlist and downloads audio with yt-dlp; the app draws every
-frame with Core Graphics + Core Image on the GPU (Metal) and encodes with
-AVFoundation/VideoToolbox — no ffmpeg pipe.
+It needs no Python, uv or Playwright: it reads the playlist itself (Apple's amp-api, via a
+hidden WebKit view or a direct request), runs the yt-dlp command-line tool to find and
+download each song, draws every frame with Core Graphics + Core Image on the GPU (Metal),
+and encodes with AVFoundation/VideoToolbox.
 
 ```bash
+brew install yt-dlp ffmpeg deno  # the command-line tools the app runs
 macos/build-app.sh --open        # builds macos/build/Playlist Gen.app and launches it
 ```
+
+The built app doesn't depend on this repository (the sample backgrounds are copied into it),
+so you can move it to /Applications.
 
 - Paste a playlist link (or **Paste Link and Load**), pick / reorder / rename songs, then **Generate Video** (⌘↩).
 - Double-click a title, artist or album to edit it. Edits appear in the video and chapters;
   the YouTube search keeps using Apple Music's original metadata.
 - The inspector shows a live preview drawn by the same renderer as the video.
-- Settings (⌘,) has the video format (HEVC / H.264), concurrency, and where the Python project and `uv` live.
+- Settings (⌘,) has the video format (HEVC / H.264), concurrency, the playlist reader, and a
+  **Tools** tab showing where yt-dlp, ffmpeg and deno were found (Homebrew, `~/.local/bin`,
+  `~/.cargo/bin`, `~/.deno/bin`, pyenv shims, `PATH`; this repo's `.venv/bin/yt-dlp` as a last
+  resort), with **Choose…** overrides and **Update yt-dlp** (`brew upgrade yt-dlp` or `yt-dlp -U`).
 - `macos/Resources/AppIcon.icon` is an Icon Composer document.
 
 Developer bits: `swift test --package-path macos` runs the tests;
-`swift run --package-path macos render-frame --help` renders single frames or a whole clip.
+`swift run --package-path macos render-frame --help` renders single frames or a whole clip;
+`swift run --package-path macos playlist-source fetch <playlist-url> [fast|web]` and
+`… playlist-source download <playlist-url> <folder> [count] [workers]` exercise the playlist
+reader and downloader from the command line.
+
+The requirements below are for the Python CLI / TUI only.
 
 ## Requirements
 

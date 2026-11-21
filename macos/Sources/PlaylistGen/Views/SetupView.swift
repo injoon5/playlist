@@ -1,4 +1,5 @@
 import AppKit
+import PlaylistSource
 import SwiftUI
 
 struct ContentView: View {
@@ -13,8 +14,8 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 960, minHeight: 600)
-        // Once per launch: reopening the window (e.g. after closing it during a run) keeps the backend.
-        .task { if model.environment == nil { await model.connect() } }
+        // Once per launch: reopening the window (e.g. after closing it during a run) keeps the tools.
+        .task { if model.tools == nil { await model.checkTools() } }
     }
 }
 
@@ -85,23 +86,12 @@ struct SetupView: View {
     @ViewBuilder
     private var trackArea: some View {
         @Bindable var model = model
-        if let error = model.environmentError {
-            ContentUnavailableView {
-                Label("Can’t Start the Python Backend", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(error).textSelection(.enabled)
-            } actions: {
-                Button("Try Again") { Task { await model.connect() } }
-                    .buttonStyle(.glassProminent)
-                SettingsLink { Text("Open Settings…") }
-                    .buttonStyle(.glass)
-            }
-        } else if model.environment == nil {
+        if let problem = model.toolProblem, model.tools == nil {
+            ToolsMissingView(problem: problem)
+        } else if model.tools == nil {
             VStack(spacing: 10) {
                 ProgressView()
-                Text("Starting the Python Backend…").font(.headline)
-                Text("The first launch can take a minute while uv sets up its environment.")
-                    .foregroundStyle(.secondary)
+                Text("Checking for yt-dlp and ffmpeg…").font(.headline)
             }
         } else if model.tracks.isEmpty {
             if model.isLoading {
@@ -166,12 +156,61 @@ private struct PlaylistLinkField: View {
                 .labelStyle(.iconOnly)
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .disabled(model.environment == nil)
+                .disabled(model.tools == nil)
                 .help(model.tracks.isEmpty ? "Load the playlist (⌘L)" : "Reload the playlist (⌘L)")
             }
         }
         .padding(.horizontal, 10)
         .frame(minWidth: 320, idealWidth: 460, maxWidth: 560)
+    }
+}
+
+/// yt-dlp or ffmpeg is missing (or won't run): say how to install them.
+private struct ToolsMissingView: View {
+    @Environment(AppModel.self) private var model
+    let problem: ToolProblem
+
+    private var title: String {
+        switch problem {
+        case .missing(let tools): "Install \(tools.map(\.rawValue).joined(separator: " and "))"
+        case .invalidOverride(let tool, _): "Choose \(tool.rawValue) Again"
+        case .broken(let tool, _): "Can’t Run \(tool.rawValue)"
+        }
+    }
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(title, systemImage: "wrench.and.screwdriver")
+        } description: {
+            VStack(spacing: 10) {
+                Text(problem.localizedDescription)
+                    .textSelection(.enabled)
+                Text("In Terminal, run:")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(ToolPaths.installCommand)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                    Button("Copy", systemImage: "doc.on.doc") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(ToolPaths.installCommand, forType: .string)
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .help("Copy the command")
+                    .accessibilityLabel("Copy install command")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.quaternary, in: .rect(cornerRadius: 6))
+            }
+        } actions: {
+            Button("Try Again") { Task { await model.checkTools() } }
+                .buttonStyle(.glassProminent)
+                .disabled(model.isCheckingTools)
+            SettingsLink { Text("Open Settings…") }
+                .buttonStyle(.glass)
+        }
     }
 }
 
@@ -202,7 +241,7 @@ private struct EmptyPlaylistView: View {
             }
             .buttonStyle(.glassProminent)
             .controlSize(.large)
-            .disabled(model.environment == nil)
+            .disabled(model.tools == nil)
         }
     }
 

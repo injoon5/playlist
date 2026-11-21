@@ -8,6 +8,8 @@ let package = Package(
         .executable(name: "PlaylistGen", targets: ["PlaylistGen"]),
         .executable(name: "render-frame", targets: ["RenderFrame"]),
         .library(name: "PlaylistRender", targets: ["PlaylistRender"]),
+        .library(name: "PlaylistSource", targets: ["PlaylistSource"]),
+        .executable(name: "playlist-source", targets: ["PlaylistSourceCLI"]),
     ],
     dependencies: [
         // Progress bar on the Dock icon while rendering.
@@ -20,10 +22,17 @@ let package = Package(
             name: "PlaylistRender",
             path: "Sources/PlaylistRender"
         ),
+        // Apple Music scraping (URLSession + a hidden WKWebView) and downloads
+        // through the yt-dlp / ffmpeg command-line tools — a port of
+        // playlist_video/scraper.py and downloader.py. No Python needed.
+        .target(
+            name: "PlaylistSource",
+            path: "Sources/PlaylistSource"
+        ),
         // The AppKit + SwiftUI app.
         .executableTarget(
             name: "PlaylistGen",
-            dependencies: ["PlaylistRender", "DockProgress"],
+            dependencies: ["PlaylistRender", "PlaylistSource", "DockProgress"],
             path: "Sources/PlaylistGen"
         ),
         // Renders single frames to PNG (or a whole clip), for checking the look against the Python renderer.
@@ -31,6 +40,19 @@ let package = Package(
             name: "RenderFrame",
             dependencies: ["PlaylistRender"],
             path: "Sources/RenderFrame"
+        ),
+        // Loads a playlist and downloads songs from the command line, for
+        // checking PlaylistSource against the real services.
+        .executableTarget(
+            name: "PlaylistSourceCLI",
+            dependencies: ["PlaylistSource"],
+            path: "Sources/PlaylistSourceCLI"
+        ),
+        .testTarget(
+            name: "PlaylistSourceTests",
+            dependencies: ["PlaylistSource"],
+            path: "Tests/PlaylistSourceTests",
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "PlaylistRenderTests",

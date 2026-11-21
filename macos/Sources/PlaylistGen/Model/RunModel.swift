@@ -3,14 +3,20 @@ import DockProgress
 import Foundation
 import Observation
 import PlaylistRender
+import PlaylistSource
 import UserNotifications
+
+/// The render and concat code below still says BridgeTrack (the Python
+/// bridge's name for a track); kept so this file merges cleanly with render
+/// work happening in parallel. Rename to PlaylistTrack after that merge.
+typealias BridgeTrack = PlaylistTrack
 
 /// Inputs for one generation run, frozen when the user presses Generate.
 struct RunConfig: Sendable {
     /// Final order; `index` is 1-based position. Titles may be user-edited.
-    var tracks: [BridgeTrack]
+    var tracks: [PlaylistTrack]
     /// Same order, with Apple Music's original metadata (for the YouTube search).
-    var searchTracks: [BridgeTrack]
+    var searchTracks: [PlaylistTrack]
     /// Background image per track (nil = blurred artwork / gradient).
     var backgrounds: [String?]
     var output: String
@@ -106,13 +112,12 @@ final class RunModel {
     let startedAt = Date()
     private(set) var finishedAt: Date?
 
-    private let environment: ToolEnvironment
+    /// yt-dlp / ffmpeg / deno locations; `environment.environment` is the
+    /// child-process environment (PATH leads with those tools' folders).
+    private let environment: ToolPaths
     private let cancelFlag = CancellationFlag()
     private let workdir: URL
-    private var bridge: BridgeProcess?
-    private var downloaded: [DownloadedTrack]?
-    private var bridgeError: String?
-    private var bridgeCancelled = false
+    private var downloadTask: Task<[DownloadedTrack], Error>?
     private var renderFractions: [Int: Double] = [:]
     private var renderCompleted = 0
     private var renderTotal = 0
@@ -123,14 +128,14 @@ final class RunModel {
 
     var isActive: Bool { state == .running || state == .cancelling }
 
-    func track(index: Int?) -> BridgeTrack? {
+    func track(index: Int?) -> PlaylistTrack? {
         guard let index else { return nil }
         return config.tracks.first { $0.index == index }
     }
 
-    init(config: RunConfig, environment: ToolEnvironment) {
+    init(config: RunConfig, tools: ToolPaths) {
         self.config = config
-        self.environment = environment
+        self.environment = tools
         self.rows = config.tracks.map {
             Row(id: $0.index ?? 0, title: $0.title, artist: $0.artist, phase: "download", status: "pending")
         }
@@ -147,14 +152,15 @@ final class RunModel {
         state = .cancelling
         headline = "Stopping…"
         cancelFlag.cancel()
-        bridge?.requestCancel()
+        downloadTask?.cancel()  // stops every yt-dlp process
     }
 
     /// App is quitting: stop everything right away.
     func shutdown() {
         DockProgress.resetProgress()
         cancelFlag.cancel()
-        bridge?.terminate()
+        downloadTask?.cancel()
+        ProcessRegistry.shared.killAll()
         guard isActive else { return }
         removePartialOutput()
         try? FileManager.default.removeItem(at: workdir)
@@ -203,7 +209,7 @@ final class RunModel {
         }
         finishedAt = Date()
         slots.removeAll()
-        bridge = nil
+        downloadTask = nil
         if state == .finished {
             DockProgress.progress = 1  // animates to full, then shows the plain icon
         } else {
@@ -223,45 +229,42 @@ final class RunModel {
         if cancelFlag.isCancelled { throw RenderCancelled() }
     }
 
+    /// yt-dlp search + download and artwork for every song, `workers` at a
+    /// time (PlaylistSource's port of the Python download phase).
     private func downloadPhase() async throws -> [Int: DownloadedTrack] {
         phase = "download"
         headline = "Downloading Songs"
         detail = "Finding each song and downloading its audio and artwork"
-        let request = DownloadRequest(tracks: config.searchTracks, workers: config.workers, workdir: workdir.path)
-        let process = BridgeProcess(environment: environment, arguments: ["download"])
-        bridge = process
-        let status = try await process.run(
-            input: try request.encodedLine(),
-            onMessage: { [weak self] message in self?.handleBridge(message) },
-            onLog: { [weak self] line in self?.append(.output, line) }
-        )
-        bridge = nil
-        if bridgeCancelled || cancelFlag.isCancelled { throw RenderCancelled() }
-        guard let downloaded else {
-            throw RunError(message: bridgeError ?? "The download step stopped unexpectedly (exit status \(status)).")
+        let downloader = MediaDownloader(tools: environment)
+        let tracks = config.searchTracks
+        let workers = config.workers
+        let workdir = self.workdir
+        let (events, continuation) = AsyncStream<DownloadEvent>.makeStream()
+        let task = Task.detached {
+            defer { continuation.finish() }
+            return try await downloader.downloadAll(tracks, workers: workers, workdir: workdir, events: continuation)
+        }
+        downloadTask = task
+        for await event in events {
+            switch event {
+            case .progress(let ev): handleDownload(ev)
+            case .log(let line): append(.output, line)
+            }
+        }
+        let downloaded: [DownloadedTrack]
+        do {
+            downloaded = try await task.value
+        } catch is CancellationError {
+            throw RenderCancelled()
+        }
+        downloadTask = nil
+        if cancelFlag.isCancelled { throw RenderCancelled() }
+        for t in downloaded {
+            if let title = t.matchedVideoTitle, t.audioPath != nil {
+                append(.output, "  #\(t.index) matched “\(title)”")
+            }
         }
         return Dictionary(downloaded.map { ($0.index, $0) }, uniquingKeysWith: { first, _ in first })
-    }
-
-    private func handleBridge(_ message: BridgeMessage) {
-        switch message {
-        case .progress(let ev):
-            handleDownload(ev)
-        case .downloaded(let tracks):
-            downloaded = tracks
-            for t in tracks {
-                if let title = t.matchedVideoTitle, t.audioPath != nil {
-                    append(.output, "  #\(t.index) matched “\(title)”")
-                }
-            }
-        case .cancelled:
-            bridgeCancelled = true
-        case .error(let message, let detail):
-            bridgeError = message
-            if let detail { append(.output, detail) }
-        default:
-            break
-        }
     }
 
     private func handleDownload(_ ev: ProgressEvent) {
