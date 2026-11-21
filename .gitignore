@@ -48,3 +48,6 @@ marquee_test.*
 macos/.build/
 macos/build/
 macos/.swiftpm/
+
+# Claude Code agent worktrees
+.claude/
