@@ -13,13 +13,16 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 960, minHeight: 600)
-        .task { await model.connect() }
+        // Once per launch: reopening the window (e.g. after closing it during a run) keeps the backend.
+        .task { if model.environment == nil { await model.connect() } }
     }
 }
 
 struct SetupView: View {
     @Environment(AppModel.self) private var model
-    @State private var showInspector = true
+    @Environment(\.undoManager) private var undoManager
+    /// Remembered across launches and across visits to the run screen.
+    @AppStorage("showInspector") private var showInspector = true
 
     var body: some View {
         @Bindable var model = model
@@ -46,7 +49,7 @@ struct SetupView: View {
                     }
                     .buttonStyle(.glassProminent)
                     .disabled(!model.canGenerate)
-                    .help(model.generateBlocker ?? "Render the selected songs into one video (⌘↩)")
+                    .help(model.generateBlocker ?? "Make one video from the included songs (⌘↩)")
                 }
                 ToolbarSpacer(.fixed, placement: .primaryAction)
                 ToolbarItem(placement: .primaryAction) {
@@ -70,7 +73,7 @@ struct SetupView: View {
                 }
                 Button("Cancel", role: .cancel) { model.confirmReplacePath = nil }
             } message: {
-                Text("A video with the same name is already in that folder. Replacing it overwrites it when the new video is finished. You can pick another name under Save To.")
+                Text("The existing video is overwritten when the new one is finished. To keep both, choose another name under Save To.")
             }
     }
 
@@ -94,7 +97,12 @@ struct SetupView: View {
                     .buttonStyle(.glass)
             }
         } else if model.environment == nil {
-            ProgressView("Starting…")
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("Starting the Python Backend…").font(.headline)
+                Text("The first launch can take a minute while uv sets up its environment.")
+                    .foregroundStyle(.secondary)
+            }
         } else if model.tracks.isEmpty {
             if model.isLoading {
                 VStack(spacing: 10) {
@@ -109,8 +117,16 @@ struct SetupView: View {
                 } description: {
                     Text(message).textSelection(.enabled)
                 } actions: {
-                    Button("Try Again") { model.loadTracks() }
-                        .buttonStyle(.glassProminent)
+                    if AppModel.isAppleMusicLink(model.settings.playlistURL) {
+                        Button("Try Again") { model.loadTracks() }
+                            .buttonStyle(.glassProminent)
+                    }
+                    Button {
+                        model.pasteLinkAndLoad()
+                    } label: {
+                        Label("Paste Link and Load", systemImage: "doc.on.clipboard")
+                    }
+                    .buttonStyle(.glass)
                 }
             } else {
                 EmptyPlaylistView()
@@ -133,7 +149,9 @@ private struct PlaylistLinkField: View {
             TextField("Apple Music playlist link", text: $model.settings.playlistURL)
                 .textFieldStyle(.plain)
                 .onSubmit { model.loadTracks() }
+                .onChange(of: model.settings.playlistURL) { model.clearLoadError() }
                 .disabled(model.isLoading)
+                .accessibilityLabel("Playlist link")
             if model.isLoading {
                 ProgressView().controlSize(.small)
                 Button("Stop", systemImage: "xmark.circle.fill") { model.cancelLoad() }
@@ -170,7 +188,7 @@ private struct EmptyPlaylistView: View {
                 Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
                     step(1, "Load the playlist")
                     step(2, "Pick, reorder, or rename songs")
-                    step(3, "Click Generate Video")
+                    step(3, "Click Generate")
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -178,11 +196,7 @@ private struct EmptyPlaylistView: View {
             }
         } actions: {
             Button {
-                if let link = NSPasteboard.general.string(forType: .string)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines), link.contains("music.apple.com") {
-                    model.settings.playlistURL = link
-                }
-                model.loadTracks()
+                model.pasteLinkAndLoad()
             } label: {
                 Label("Paste Link and Load", systemImage: "doc.on.clipboard")
             }
@@ -198,7 +212,9 @@ private struct EmptyPlaylistView: View {
                 .font(.caption.bold().monospacedDigit())
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(.quaternary))
+                .accessibilityHidden(true)
             Text(text)
+                .accessibilityLabel("Step \(n): \(text)")
         }
     }
 }
@@ -206,14 +222,17 @@ private struct EmptyPlaylistView: View {
 /// Selection summary and list tools under the table.
 private struct StatusBar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         @Bindable var model = model
         HStack(spacing: 12) {
-            Button("Select All") { model.setAllIncluded(true) }
+            Button("Include All") { model.setAllIncluded(true, undoManager: undoManager) }
                 .disabled(model.includedCount == model.tracks.count)
-            Button("Deselect All") { model.setAllIncluded(false) }
+                .help("Check every song (⌥⌘A)")
+            Button("Exclude All") { model.setAllIncluded(false, undoManager: undoManager) }
                 .disabled(model.includedCount == 0)
+                .help("Uncheck every song (⌥⇧⌘A)")
             Toggle("Shuffle", isOn: $model.settings.shuffle)
                 .toggleStyle(.checkbox)
                 .help("Shuffle the selected songs when generating, instead of using the list order")
@@ -240,25 +259,46 @@ private struct StatusBar: View {
 
     private var summary: String {
         let n = model.includedCount
-        let songs = n == 1 ? "1 song" : "\(n) songs"
-        return "\(songs) selected · \(formatLongDuration(model.includedDuration))"
+        let total = model.tracks.count
+        let songs = n == total
+            ? (n == 1 ? "1 song" : "\(n) songs")
+            : "\(n) of \(total) songs"
+        return "\(songs) · \(formatLongDuration(model.includedDuration))"
     }
 
     /// Reasons Generate is disabled that the user can fix from here.
     private var warning: String? {
         if case .failed(let message) = model.loadState { return message }
-        if model.includedCount == 0 { return "Select at least one song to generate a video." }
+        if model.includedCount == 0 { return "Include at least one song to generate a video." }
         if model.settings.backgrounds.count > model.includedCount {
-            return "More backgrounds (\(model.settings.backgrounds.count)) than selected songs."
+            return "More background images (\(model.settings.backgrounds.count)) than included songs."
         }
         return nil
     }
 }
 
-/// "1 hr 58 min" style, like Music's status bar.
+/// "1 hr, 58 min" / "48 min" style, like Music's status bar (no seconds
+/// once there's a minute or more).
 func formatLongDuration(_ seconds: Double) -> String {
     let formatter = DateComponentsFormatter()
-    formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
     formatter.unitsStyle = .short
-    return formatter.string(from: seconds) ?? formatDuration(seconds)
+    let value: Double
+    if seconds >= 60 {
+        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute]
+        value = (seconds / 60).rounded() * 60
+    } else {
+        formatter.allowedUnits = [.second]
+        value = seconds.rounded()
+    }
+    return formatter.string(from: value) ?? formatDuration(seconds)
+}
+
+/// Finder-style estimate: "About 4 minutes left", "Less than a minute left".
+func formatTimeLeft(_ seconds: Double) -> String {
+    guard seconds >= 60 else { return "Less than a minute left" }
+    let formatter = DateComponentsFormatter()
+    formatter.unitsStyle = .full
+    formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute]
+    let rounded = (seconds / 60).rounded() * 60
+    return "About \(formatter.string(from: rounded) ?? formatDuration(seconds)) left"
 }

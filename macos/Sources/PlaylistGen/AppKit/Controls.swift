@@ -92,33 +92,38 @@ struct PathControlView: NSViewRepresentable {
     }
 }
 
+/// Open and save panels, shown as sheets on the window they were asked
+/// from (the main window or Settings), like any document-style Mac app.
 @MainActor
 enum Panels {
-    static func chooseOutput(current: String) -> String? {
+    private static func present(_ panel: NSSavePanel) async -> Bool {
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow, window.attachedSheet == nil {
+            return await panel.beginSheetModal(for: window) == .OK
+        }
+        return panel.runModal() == .OK
+    }
+
+    static func chooseOutput(current: String) async -> String? {
         let panel = NSSavePanel()
-        panel.title = "Save Video As"
+        panel.message = "Choose where to save the video."
+        panel.prompt = "Choose"
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.canCreateDirectories = true
-        if !current.isEmpty {
-            let url = URL(fileURLWithPath: current)
-            panel.directoryURL = url.deletingLastPathComponent()
-            panel.nameFieldStringValue = url.lastPathComponent
-        } else {
-            panel.nameFieldStringValue = "playlist_video.mp4"
-        }
-        return panel.runModal() == .OK ? panel.url?.path : nil
+        let url = URL(fileURLWithPath: current.isEmpty ? AppModel.defaultOutputPath : current)
+        panel.directoryURL = url.deletingLastPathComponent()
+        panel.nameFieldStringValue = url.lastPathComponent
+        return await present(panel) ? panel.url?.path : nil
     }
 
     /// Save another copy of a finished video (and its chapters file).
-    static func saveCopy(of output: RunModel.Output) {
+    static func saveCopy(of output: RunModel.Output) async {
         let source = URL(fileURLWithPath: output.videoPath)
         let panel = NSSavePanel()
-        panel.title = "Save a Copy"
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = source.lastPathComponent
         panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
-        guard panel.runModal() == .OK, let dest = panel.url, dest.standardizedFileURL != source.standardizedFileURL else { return }
+        guard await present(panel), let dest = panel.url, dest.standardizedFileURL != source.standardizedFileURL else { return }
         let fm = FileManager.default
         do {
             if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }  // the panel already asked
@@ -128,36 +133,44 @@ enum Panels {
             try? fm.copyItem(atPath: output.descriptionPath, toPath: chapters)
             NSWorkspace.shared.activateFileViewerSelecting([dest])
         } catch {
-            NSAlert(error: error).runModal()
+            let alert = NSAlert(error: error)
+            if let window = NSApp.mainWindow {
+                await alert.beginSheetModal(for: window)
+            } else {
+                alert.runModal()
+            }
         }
     }
 
-    static func chooseImages() -> [String] {
+    static func chooseImages() async -> [String] {
         let panel = NSOpenPanel()
-        panel.title = "Add Background Images"
+        panel.message = "Choose images to use as video backgrounds."
+        panel.prompt = "Add"
         panel.allowedContentTypes = [.image]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        return panel.runModal() == .OK ? panel.urls.map(\.path) : []
+        return await present(panel) ? panel.urls.map(\.path) : []
     }
 
-    static func chooseFolder(title: String, current: String?) -> String? {
+    static func chooseFolder(message: String, current: String?) async -> String? {
         let panel = NSOpenPanel()
-        panel.title = title
+        panel.message = message
+        panel.prompt = "Choose"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         if let current { panel.directoryURL = URL(fileURLWithPath: current) }
-        return panel.runModal() == .OK ? panel.url?.path : nil
+        return await present(panel) ? panel.url?.path : nil
     }
 
-    static func chooseExecutable(title: String) -> String? {
+    static func chooseExecutable(message: String) async -> String? {
         let panel = NSOpenPanel()
-        panel.title = title
+        panel.message = message
+        panel.prompt = "Choose"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.treatsFilePackagesAsDirectories = true
         panel.showsHiddenFiles = true
-        return panel.runModal() == .OK ? panel.url?.path : nil
+        return await present(panel) ? panel.url?.path : nil
     }
 }

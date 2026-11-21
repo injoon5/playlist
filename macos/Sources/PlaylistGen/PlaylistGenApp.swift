@@ -12,6 +12,7 @@ struct PlaylistGenApp: App {
                 .environment(model)
                 .onAppear { appDelegate.model = model }
         }
+        .defaultSize(width: 1240, height: 780)
         .commands {
             PlaylistCommands(model: model)
             InspectorCommands()
@@ -31,7 +32,7 @@ struct PlaylistCommands: Commands {
         CommandGroup(replacing: .newItem) {}
         CommandGroup(replacing: .saveItem) {
             Button("Save a Copy…") {
-                if let output = model.run?.output { Panels.saveCopy(of: output) }
+                if let output = model.run?.output { Task { await Panels.saveCopy(of: output) } }
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(model.run?.output == nil)
@@ -51,14 +52,14 @@ struct PlaylistCommands: Commands {
                 .keyboardShortcut(.return)
                 .disabled(!model.canGenerate)
             Divider()
-            Button("Select All Songs") { model.setAllIncluded(true) }
+            Button("Include All Songs") { model.setAllIncluded(true) }
                 .keyboardShortcut("a", modifiers: [.command, .option])
                 .disabled(model.tracks.isEmpty || model.run != nil)
-            Button("Deselect All Songs") { model.setAllIncluded(false) }
+            Button("Exclude All Songs") { model.setAllIncluded(false) }
                 .keyboardShortcut("a", modifiers: [.command, .option, .shift])
                 .disabled(model.tracks.isEmpty || model.run != nil)
             Divider()
-            Button("Cancel Generation") { model.run?.cancel() }
+            Button("Stop Generating") { model.run?.cancel() }
                 .keyboardShortcut(".")
                 .disabled(model.run?.state != .running)
             Button("Back to Playlist") { model.closeRun() }
@@ -80,16 +81,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window quits, except mid-render: then the render keeps
+    /// going (Dock progress + a notification when done) and clicking the
+    /// Dock icon brings the window back.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        model?.run?.isActive != true
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
         if model.run?.isActive == true {
             let alert = NSAlert()
-            alert.messageText = "Stop generating the video?"
-            alert.informativeText = "Quitting cancels the current run."
-            alert.addButton(withTitle: "Quit")
-            alert.addButton(withTitle: "Keep Running")
+            alert.messageText = "Quit while the video is being generated?"
+            alert.informativeText = "Quitting stops generating and deletes the unfinished video."
+            alert.addButton(withTitle: "Quit").hasDestructiveAction = true
+            alert.addButton(withTitle: "Keep Generating")
             guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
         }
         model.shutdown()

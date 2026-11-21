@@ -127,7 +127,7 @@ final class AppModel {
         }).first else {
             environment = nil
             let tail = box.log.suffix(6).joined(separator: "\n")
-            environmentError = "The Python backend didn't start (exit \(status ?? -1)).\n\(tail)"
+            environmentError = "The Python backend didn’t start (exit status \(status ?? -1)).\n\(tail)"
             return
         }
 
@@ -191,11 +191,11 @@ final class AppModel {
     func loadTracks() {
         let url = settings.playlistURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else {
-            loadState = .failed("Paste an Apple Music playlist link first.")
+            loadState = .failed("Paste an Apple Music playlist link first. In Music, choose Share › Copy Link on a playlist.")
             return
         }
-        guard url.contains("music.apple.com") else {
-            loadState = .failed("That doesn't look like an Apple Music link (music.apple.com/…/playlist/…).")
+        guard Self.isAppleMusicLink(url) else {
+            loadState = .failed("That doesn’t look like an Apple Music link (music.apple.com/…/playlist/…).")
             return
         }
         guard let environment, run == nil else { return }
@@ -235,6 +235,28 @@ final class AppModel {
         }
     }
 
+    static func isAppleMusicLink(_ string: String) -> Bool {
+        string.contains("music.apple.com")
+    }
+
+    /// Use the Apple Music link on the clipboard (if there is one), then load.
+    func pasteLinkAndLoad() {
+        let clipboard = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if Self.isAppleMusicLink(clipboard) {
+            settings.playlistURL = clipboard
+        } else if !Self.isAppleMusicLink(settings.playlistURL) {
+            loadState = .failed("There’s no Apple Music link on the clipboard. In Music, choose Share › Copy Link on a playlist, then try again.")
+            return
+        }
+        loadTracks()
+    }
+
+    /// Editing the link dismisses a previous load error.
+    func clearLoadError() {
+        if case .failed = loadState { loadState = .idle }
+    }
+
     /// Reloading keeps your work: songs still in the playlist keep their
     /// edits, selection and your order; new songs are added at the end.
     static func merge(_ loaded: [BridgeTrack], into existing: [TrackRow]) -> [TrackRow] {
@@ -263,8 +285,30 @@ final class AppModel {
         loadState = .idle
     }
 
-    func setAllIncluded(_ included: Bool) {
-        for i in tracks.indices { tracks[i].included = included }
+    /// Include or exclude every song. Undoable like the table's own edits
+    /// (same window undo manager), so a stray Exclude All isn't a disaster.
+    func setAllIncluded(_ included: Bool, undoManager: UndoManager? = nil) {
+        let updated = tracks.map { row in
+            var row = row
+            row.included = included
+            return row
+        }
+        replaceTracks(
+            updated, actionName: included ? "Include All" : "Exclude All",
+            undoManager: undoManager ?? NSApp.mainWindow?.undoManager
+        )
+    }
+
+    private func replaceTracks(_ updated: [TrackRow], actionName: String, undoManager: UndoManager?) {
+        let previous = tracks
+        guard previous != updated else { return }
+        tracks = updated
+        undoManager?.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                model.replaceTracks(previous, actionName: actionName, undoManager: undoManager)
+            }
+        }
+        undoManager?.setActionName(actionName)
     }
 
     var includedTracks: [BridgeTrack] { tracks.filter(\.included).map(\.track) }
@@ -297,13 +341,13 @@ final class AppModel {
     // MARK: - Generate
 
     var generateBlocker: String? {
-        if environment == nil { return "The Python backend isn't connected." }
-        if run != nil { return "A run is already open." }
+        if environment == nil { return "The Python backend isn’t connected." }
+        if run != nil { return "A video is already being generated." }
         if isLoading { return "Wait for the playlist to finish loading." }
         if tracks.isEmpty { return "Load a playlist first." }
-        if includedCount == 0 { return "Select at least one track." }
+        if includedCount == 0 { return "Include at least one song." }
         if settings.backgrounds.count > includedCount {
-            return "\(settings.backgrounds.count) backgrounds but only \(includedCount) track(s) selected."
+            return "There are more background images (\(settings.backgrounds.count)) than included songs (\(includedCount))."
         }
         return nil
     }
@@ -348,6 +392,14 @@ final class AppModel {
             gpu: settings.gpu, transitionDuration: settings.transitionDuration
         )
         let model = RunModel(config: config, environment: environment)
+        run = model
+        model.start()
+    }
+
+    /// Run the same video again after a failure or a stop.
+    func retryRun() {
+        guard let previous = run, !previous.isActive, let environment else { return }
+        let model = RunModel(config: previous.config, environment: environment)
         run = model
         model.start()
     }

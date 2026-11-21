@@ -64,8 +64,10 @@ struct InspectorView: View {
                     PathControlView(path: model.settings.output)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Choose…") {
-                        if let path = Panels.chooseOutput(current: model.settings.output) {
-                            model.settings.output = path
+                        Task {
+                            if let path = await Panels.chooseOutput(current: model.settings.output) {
+                                model.settings.output = path
+                            }
                         }
                     }
                 }
@@ -92,6 +94,9 @@ struct BackgroundPicker: View {
                     }
                     .buttonStyle(.plain)
                     .help((path as NSString).lastPathComponent)
+                    .accessibilityLabel(((path as NSString).lastPathComponent as NSString).deletingPathExtension)
+                    .accessibilityValue(order.map { "Background \($0 + 1)" } ?? "Not used")
+                    .accessibilityAddTraits(order != nil ? .isSelected : [])
                     .contextMenu {
                         Button("Show in Finder") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -104,7 +109,7 @@ struct BackgroundPicker: View {
             }
             HStack {
                 Button("Add Images…") {
-                    model.addBackgrounds(Panels.chooseImages())
+                    Task { model.addBackgrounds(await Panels.chooseImages()) }
                 }
                 Spacer()
                 Button("Use Song Artwork") { model.settings.backgrounds = [] }
@@ -188,7 +193,7 @@ struct PreviewPane: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                 } else if model.previewKey == nil {
-                    Text("Load a playlist to preview")
+                    Text("Load a playlist to see a preview")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -198,21 +203,28 @@ struct PreviewPane: View {
             }
             .aspectRatio(CGFloat(model.settings.size.width) / CGFloat(model.settings.size.height), contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(preview.key.map { "Preview of “\($0.title)”" } ?? "Preview")
+            .accessibilityAddTraits(.isImage)
 
             if let key = preview.key {
                 HStack(spacing: 8) {
                     Button {
                         preview.isPlaying.toggle()
                     } label: {
-                        Image(systemName: preview.isPlaying ? "pause.fill" : "play.fill")
+                        Label(preview.isPlaying ? "Pause" : "Play",
+                              systemImage: preview.isPlaying ? "pause.fill" : "play.fill")
+                            .labelStyle(.iconOnly)
                             .frame(width: 14)
                     }
                     .buttonStyle(.borderless)
-                    .help(preview.isPlaying ? "Pause" : "Play the preview")
+                    .help(preview.isPlaying ? "Pause the preview" : "Play the preview")
                     Slider(value: $preview.time, in: 0...max(key.duration, 0.1)) { editing in
                         if editing { preview.isPlaying = false }
                     }
                     .controlSize(.small)
+                    .accessibilityLabel("Preview position")
+                    .accessibilityValue(formatDuration(preview.time))
                     Text(formatDuration(preview.time))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -229,5 +241,9 @@ struct PreviewPane: View {
             guard !preview.isPlaying else { return }
             Task { await preview.render() }
         }
+        // The playback loop keeps the model alive; without this a playing
+        // preview keeps rendering behind the run screen (stealing GPU time
+        // from the real render) or with the inspector hidden.
+        .onDisappear { preview.isPlaying = false }
     }
 }

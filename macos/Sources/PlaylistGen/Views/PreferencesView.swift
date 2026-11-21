@@ -68,9 +68,14 @@ private struct BackendSettings: View {
                     HStack {
                         PathControlView(path: rootOverride.isEmpty ? (model.environment?.projectRoot.path ?? "") : rootOverride)
                         Button("Choose…") {
-                            if let path = Panels.chooseFolder(title: "Choose the playlist-gen repository", current: model.environment?.projectRoot.path) {
-                                rootOverride = path
-                                reconnect()
+                            Task {
+                                if let path = await Panels.chooseFolder(
+                                    message: "Choose the playlist-gen repository folder.",
+                                    current: model.environment?.projectRoot.path
+                                ) {
+                                    rootOverride = path
+                                    reconnect()
+                                }
                             }
                         }
                     }
@@ -82,9 +87,11 @@ private struct BackendSettings: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Button("Choose…") {
-                            if let path = Panels.chooseExecutable(title: "Choose the uv executable") {
-                                uvOverride = path
-                                reconnect()
+                            Task {
+                                if let path = await Panels.chooseExecutable(message: "Choose the uv executable.") {
+                                    uvOverride = path
+                                    reconnect()
+                                }
                             }
                         }
                     }

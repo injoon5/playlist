@@ -170,7 +170,7 @@ final class RunModel {
         defer { ProcessInfo.processInfo.endActivity(activity) }
         DockProgress.style = .bar
         Notifier.requestPermission()
-        append(.info, "Rendering \(config.tracks.count) track(s) at \(config.width)×\(config.height), \(config.fps) fps")
+        append(.info, "Rendering \(songCount(config.tracks.count)) at \(config.width)×\(config.height), \(config.fps) fps")
         do {
             try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true)
             let downloads = try await downloadPhase()
@@ -181,7 +181,7 @@ final class RunModel {
             state = .finished
             phase = "done"
             headline = "Video Ready"
-            detail = URL(fileURLWithPath: config.output).lastPathComponent
+            detail = finishedDetail()
             progress.advance(to: 1)
             append(.success, "Output: \(config.output)")
             removeWorkdir()
@@ -212,7 +212,7 @@ final class RunModel {
         if !NSApp.isActive {
             NSApp.requestUserAttention(.informationalRequest)
             switch state {
-            case .finished: Notifier.post(title: "Video Ready", body: URL(fileURLWithPath: config.output).lastPathComponent)
+            case .finished: Notifier.post(title: "Video Ready", body: detail)
             case .failed(let message): Notifier.post(title: "Couldn’t Finish the Video", body: message)
             default: break
             }
@@ -238,7 +238,7 @@ final class RunModel {
         bridge = nil
         if bridgeCancelled || cancelFlag.isCancelled { throw RenderCancelled() }
         guard let downloaded else {
-            throw RunError(message: bridgeError ?? "The download step exited with status \(status).")
+            throw RunError(message: bridgeError ?? "The download step stopped unexpectedly (exit status \(status)).")
         }
         return Dictionary(downloaded.map { ($0.index, $0) }, uniquingKeysWith: { first, _ in first })
     }
@@ -325,7 +325,9 @@ final class RunModel {
             prepared.append(PreparedClip(track: track, job: job))
             setRow(index, phase: "render", status: "pending")
         }
-        guard !prepared.isEmpty else { throw RunError(message: "No tracks with audio. Aborting.") }
+        guard !prepared.isEmpty else {
+            throw RunError(message: "None of the songs could be downloaded. Check your internet connection, then try again.")
+        }
 
         // The GPU composites and the Media Engine encodes; a few clips in
         // flight keep both busy.
@@ -334,7 +336,7 @@ final class RunModel {
         renderTotal = prepared.count
         renderCompleted = 0
         detail = "0 of \(prepared.count) songs rendered"
-        append(.info, "Rendering \(prepared.count) clip(s), \(workers) at a time")
+        append(.info, "Rendering \(songCount(prepared.count)), \(workers) at a time")
 
         var finished: [Int: String] = [:]
         var freeSlots = Array(0..<workers)
@@ -387,7 +389,9 @@ final class RunModel {
         }
         try checkCancelled()
         let clips = prepared.indices.compactMap { i in finished[i].map { (prepared[i].track, $0) } }
-        guard !clips.isEmpty else { throw RunError(message: "No clips were rendered successfully. Aborting.") }
+        guard !clips.isEmpty else {
+            throw RunError(message: "None of the songs could be rendered. Show Details for more information.")
+        }
         return clips
     }
 
@@ -423,6 +427,27 @@ final class RunModel {
     }
 
     // MARK: - Helpers
+
+    private func songCount(_ n: Int) -> String { n == 1 ? "1 song" : "\(n) songs" }
+
+    /// Songs that didn't make it into the video.
+    var leftOutCount: Int {
+        rows.filter { $0.status == "skipped" || $0.status == "failed" }.count
+    }
+
+    /// "Playlist Video.mp4 · 1 hr, 52 min", or a heads-up that songs are missing.
+    private func finishedDetail() -> String {
+        let name = URL(fileURLWithPath: config.output).lastPathComponent
+        let missing = leftOutCount
+        guard missing > 0 else {
+            let seconds = config.tracks.reduce(0.0) { $0 + Double($1.durationMs ?? 0) / 1000 }
+            return seconds > 0 ? "\(name) · \(formatLongDuration(seconds))" : name
+        }
+        let included = rows.count - missing
+        return missing == 1
+            ? "1 song couldn’t be downloaded or rendered and was left out (\(included) of \(rows.count) are in the video)."
+            : "\(missing) songs couldn’t be downloaded or rendered and were left out (\(included) of \(rows.count) are in the video)."
+    }
 
     private func setRow(_ index: Int, phase: String, status: String) {
         guard let i = rows.firstIndex(where: { $0.id == index }) else { return }

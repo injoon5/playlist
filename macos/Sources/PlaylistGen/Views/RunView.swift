@@ -9,6 +9,7 @@ struct RunView: View {
     let run: RunModel
     @State private var showDetails = false
     @State private var showChapters = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,7 +54,7 @@ struct RunView: View {
                     Button {
                         model.closeRun()
                     } label: {
-                        Label("Back to Songs", systemImage: "chevron.backward")
+                        Label("Back to Playlist", systemImage: "chevron.backward")
                     }
                     .help("Return to the song list (⌘[)")
                 }
@@ -61,18 +62,24 @@ struct RunView: View {
         }
         .navigationTitle(URL(fileURLWithPath: run.config.output).lastPathComponent)
         .navigationSubtitle("\(run.config.tracks.count) songs · \(run.config.width)×\(run.config.height)")
+        // A failure's full story is in the log; don't make people hunt for it.
+        .onChange(of: run.state) { _, state in
+            if case .failed = state { showDetails = true }
+        }
     }
 
     private var details: some View {
         VStack(spacing: 0) {
             HStack {
                 Button {
-                    withAnimation(.snappy) { showDetails.toggle() }
+                    withAnimation(reduceMotion ? nil : .snappy) { showDetails.toggle() }
                 } label: {
                     Label(showDetails ? "Hide Details" : "Show Details", systemImage: "chevron.right")
                         .labelStyle(DisclosureLabelStyle(expanded: showDetails))
                 }
                 .buttonStyle(.borderless)
+                .accessibilityLabel("Details")
+                .accessibilityValue(showDetails ? "Expanded" : "Collapsed")
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -101,6 +108,7 @@ private struct DisclosureLabelStyle: LabelStyle {
 }
 
 private struct RunHeader: View {
+    @Environment(AppModel.self) private var model
     let run: RunModel
 
     var body: some View {
@@ -137,12 +145,18 @@ private struct RunHeader: View {
                         Button("Show in Finder") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: output.videoPath)])
                         }
-                        Button("Save a Copy…") { Panels.saveCopy(of: output) }
+                        .help("Show the video in Finder (⌥⌘R)")
+                        Button("Save a Copy…") { Task { await Panels.saveCopy(of: output) } }
                             .help("Save another copy of the video and its chapters (⇧⌘S)")
                         Button("Play") {
                             NSWorkspace.shared.open(URL(fileURLWithPath: output.videoPath))
                         }
                         .keyboardShortcut(.defaultAction)
+                    } else {
+                        Button(run.state == .cancelled ? "Start Again" : "Try Again") { model.retryRun() }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(model.environment == nil)
+                            .help("Generate the same video again")
                     }
                 }
             }
@@ -157,6 +171,10 @@ private struct RunHeader: View {
         case .running, .cancelling:
             Image(systemName: run.phase == "download" ? "arrow.down.circle" : run.phase == "concat" ? "square.stack.3d.down.right" : "film")
                 .foregroundStyle(.tint)
+                .symbolRenderingMode(.hierarchical)
+        case .finished where run.leftOutCount > 0:
+            Image(systemName: "checkmark.circle.trianglebadge.exclamationmark")
+                .foregroundStyle(.orange)
                 .symbolRenderingMode(.hierarchical)
         case .finished:
             Image(systemName: "checkmark.circle.fill")
@@ -173,12 +191,11 @@ private struct RunHeader: View {
     }
 
     private func timing(now: Date) -> String {
+        if run.state == .cancelling { return "" }
         let elapsed = now.timeIntervalSince(run.startedAt)
         let p = run.progress.value
-        if p > 0.03, p < 1 {
-            return "About \(formatLongDuration(elapsed * (1 - p) / p)) left"
-        }
-        return formatDuration(elapsed)
+        guard p > 0.03, elapsed > 10 else { return "Estimating time left…" }
+        return formatTimeLeft(elapsed * (1 - p) / p)
     }
 }
 
@@ -253,6 +270,15 @@ private struct SongProgressRow: View {
                 .frame(width: 190, alignment: .trailing)
         }
         .padding(.vertical, 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(row.id). \(row.title), \(row.artist)")
+        .accessibilityValue(accessibilityStatus)
+    }
+
+    private var accessibilityStatus: String {
+        let text = Self.describe(row).0
+        guard let fraction, row.status == "downloading" || row.status == "rendering" else { return text }
+        return "\(text), \(Int((fraction * 100).rounded())) percent"
     }
 
     @ViewBuilder

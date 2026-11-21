@@ -43,6 +43,9 @@ struct TrackTableView: NSViewRepresentable {
         column("time", "Time", width: 46, min: 46, max: 46)
         table.tableColumns.last?.headerCell.alignment = .right
         table.tableColumns[1].headerCell.alignment = .right
+        // Remember column widths across launches.
+        table.autosaveName = "TrackTable"
+        table.autosaveTableColumns = true
 
         let coordinator = context.coordinator
         coordinator.rows = rows
@@ -51,6 +54,7 @@ struct TrackTableView: NSViewRepresentable {
         table.onToggle = { [weak coordinator] in coordinator?.toggleTargetRows() }
         table.onEdit = { [weak coordinator] in coordinator?.editSelected() }
         table.onCopy = { [weak coordinator] in coordinator?.copySelected() }
+        table.onDelete = { [weak coordinator] in coordinator?.excludeSelected() }
         table.registerForDraggedTypes([.playlistTrackRow])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         table.target = coordinator
@@ -59,6 +63,13 @@ struct TrackTableView: NSViewRepresentable {
         menu.delegate = coordinator
         table.menu = menu
         coordinator.table = table
+
+        // Coming back from the run screen (or relaunching): keep the song
+        // the preview shows selected and in view.
+        if let row = rows.firstIndex(where: { $0.id == focusedRow }) {
+            table.selectRowIndexes([row], byExtendingSelection: false)
+            table.scrollRowToVisible(row)
+        }
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -131,10 +142,11 @@ struct TrackTableView: NSViewRepresentable {
                 let button = tableView.makeView(withIdentifier: column.identifier, owner: self) as? NSButton ?? {
                     let b = NSButton(checkboxWithTitle: "", target: self, action: #selector(checkboxClicked(_:)))
                     b.identifier = column.identifier
-                    b.setAccessibilityLabel("Include in video")
+                    b.toolTip = "Include in the video (⌘-click to change every song)"
                     return b
                 }()
                 button.state = item.included ? .on : .off
+                button.setAccessibilityLabel("Include “\(item.track.title)” in video")
                 return button
             }
             let cell = textCell(tableView, id: id)
@@ -204,7 +216,7 @@ struct TrackTableView: NSViewRepresentable {
 
         func tableViewSelectionDidChange(_ notification: Notification) {
             guard let table, let first = table.selectedRowIndexes.first, first < rows.count else { return }
-            parent.focusedRow = rows[first].id
+            if parent.focusedRow != rows[first].id { parent.focusedRow = rows[first].id }
         }
 
         // MARK: Editing
@@ -230,6 +242,18 @@ struct TrackTableView: NSViewRepresentable {
                 // Unchanged, but put back the canonical value (e.g. after clearing).
                 table.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
             }
+        }
+
+        /// Escape while renaming puts the old text back, like Finder.
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard selector == #selector(NSResponder.cancelOperation(_:)), let table else { return false }
+            let row = table.row(for: control)
+            control.abortEditing()
+            if row >= 0 {
+                table.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+            }
+            table.window?.makeFirstResponder(table)
+            return true
         }
 
         func editSelected() {
@@ -279,7 +303,17 @@ struct TrackTableView: NSViewRepresentable {
             guard let table else { return }
             let row = table.row(for: sender)
             guard row >= 0 else { return }
+            // ⌘-click checks or unchecks every song, as in Music / iTunes.
+            if NSApp.currentEvent?.modifierFlags.contains(.command) == true {
+                setIncluded(sender.state == .on, rows: IndexSet(integersIn: 0..<rows.count))
+                return
+            }
             setIncluded(sender.state == .on, rows: targetRows(clicked: row))
+        }
+
+        func excludeSelected() {
+            guard let table, !table.selectedRowIndexes.isEmpty else { return }
+            setIncluded(false, rows: table.selectedRowIndexes)
         }
 
         func toggleTargetRows() {
@@ -314,6 +348,8 @@ struct TrackTableView: NSViewRepresentable {
             menu.addItem(.separator())
             add("Move to Top", #selector(moveToTop))
             add("Move to Bottom", #selector(moveToBottom))
+            menu.addItem(.separator())
+            add("Copy", #selector(copyClicked))
         }
 
         @objc private func includeClicked() { setIncluded(true, rows: targetRows()) }
@@ -321,6 +357,14 @@ struct TrackTableView: NSViewRepresentable {
         @objc private func revertClicked() { revert(targetRows()) }
         @objc private func moveToTop() { move(targetRows(), to: 0) }
         @objc private func moveToBottom() { move(targetRows(), to: rows.count) }
+        @objc private func copyClicked() {
+            guard let table else { return }
+            let targets = targetRows()
+            if targets != table.selectedRowIndexes {
+                table.selectRowIndexes(targets, byExtendingSelection: false)
+            }
+            copySelected()
+        }
         @objc private func editClicked() {
             guard let table, let row = targetRows().first else { return }
             table.selectRowIndexes([row], byExtendingSelection: false)
@@ -377,11 +421,26 @@ struct TrackTableView: NSViewRepresentable {
     }
 }
 
-/// Space toggles the selected rows' checkboxes; Return edits the title.
+/// Space toggles the selected rows' checkboxes; Return edits the title;
+/// Delete unchecks (excludes) the selected songs.
 final class TrackNSTableView: NSTableView {
     var onToggle: (() -> Void)?
     var onEdit: (() -> Void)?
     var onCopy: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    /// Take keyboard focus when the list appears (after loading, relaunching
+    /// or returning from the run screen) so arrow keys and Space just work.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window === window else { return }
+            if window.firstResponder === window || window.firstResponder == nil {
+                window.makeFirstResponder(self)
+            }
+        }
+    }
 
     /// Edit › Copy: "Title — Artist" per selected song.
     @objc func copy(_ sender: Any?) {
@@ -397,6 +456,9 @@ final class TrackNSTableView: NSTableView {
                 return
             case "\r":
                 onEdit?()
+                return
+            case "\u{7F}", String(UnicodeScalar(NSDeleteFunctionKey)!):
+                onDelete?()
                 return
             default:
                 break
