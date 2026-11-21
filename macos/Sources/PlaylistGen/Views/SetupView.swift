@@ -198,23 +198,11 @@ private struct StatusBar: View {
     var body: some View {
         @Bindable var model = model
         HStack(spacing: 12) {
-            Menu {
-                Button("Select All Songs") { model.setAllIncluded(true) }
-                Button("Deselect All Songs") { model.setAllIncluded(false) }
-            } label: {
-                Label("Selection", systemImage: "checklist")
-            }
-            .menuStyle(.button)
-            .buttonStyle(.glass)
-            .fixedSize()
-            .help("Select or deselect every song")
-
-            Toggle(isOn: $model.settings.shuffle) {
-                Label("Shuffle", systemImage: "shuffle")
-            }
-            .toggleStyle(.button)
-            .buttonStyle(.glass)
-            .help("Shuffle the selected songs when generating, instead of using the list order")
+            Button("Select All") { model.setAllIncluded(true) }
+            Button("Deselect All") { model.setAllIncluded(false) }
+            Toggle("Shuffle", isOn: $model.settings.shuffle)
+                .toggleStyle(.checkbox)
+                .help("Shuffle the selected songs when generating, instead of using the list order")
 
             Spacer()
 
@@ -228,9 +216,10 @@ private struct StatusBar: View {
                     .monospacedDigit()
             }
         }
-        .controlSize(.regular)
+        .controlSize(.small)
+        .font(.callout)
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
     }

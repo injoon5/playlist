@@ -71,6 +71,7 @@ final class RunModel {
 
     struct Slot: Identifiable, Equatable {
         let id: Int
+        var trackIndex: Int?
         var label: String
         var fraction: Double
         var phase: String
@@ -93,6 +94,8 @@ final class RunModel {
     private(set) var state: State = .running
     private(set) var phase = "download"
     private(set) var headline = "Starting…"
+    /// Second line under the headline, e.g. "12 of 27 songs rendered".
+    private(set) var detail = ""
     private(set) var progress = OverallProgress()
     private(set) var rows: [Row]
     private(set) var slots: [Int: Slot] = [:]
@@ -112,8 +115,16 @@ final class RunModel {
     private var renderCompleted = 0
     private var renderTotal = 0
     private var lastBadge = -1
+    /// True once the final file is being written; only then is a stopped
+    /// run's output deleted (never a previous video at the same path).
+    private var startedWritingOutput = false
 
     var isActive: Bool { state == .running || state == .cancelling }
+
+    func track(index: Int?) -> BridgeTrack? {
+        guard let index else { return nil }
+        return config.tracks.first { $0.index == index }
+    }
 
     init(config: RunConfig, environment: ToolEnvironment) {
         self.config = config
@@ -132,7 +143,7 @@ final class RunModel {
     func cancel() {
         guard state == .running else { return }
         state = .cancelling
-        headline = "Cancelling…"
+        headline = "Stopping…"
         cancelFlag.cancel()
         bridge?.requestCancel()
     }
@@ -141,6 +152,9 @@ final class RunModel {
     func shutdown() {
         cancelFlag.cancel()
         bridge?.terminate()
+        guard isActive else { return }
+        removePartialOutput()
+        try? FileManager.default.removeItem(at: workdir)
     }
 
     // MARK: - Pipeline
@@ -156,21 +170,26 @@ final class RunModel {
             output = try await concatPhase(clips)
             state = .finished
             phase = "done"
-            headline = "Video ready"
+            headline = "Video Ready"
+            detail = URL(fileURLWithPath: config.output).lastPathComponent
             progress.advance(to: 1)
             append(.success, "Output: \(config.output)")
             removeWorkdir()
         } catch is RenderCancelled {
+            removePartialOutput()
             state = .cancelled
-            headline = "Cancelled"
+            headline = "Stopped"
+            detail = "Nothing was saved."
             append(.warning, "Cancelled")
             removeWorkdir()
         } catch {
             let message = error.localizedDescription
+            removePartialOutput()
             state = .failed(message)
-            headline = "Failed"
+            headline = "Couldn’t Finish the Video"
+            detail = message
             append(.error, message)
-            append(.info, "Intermediate files kept in \(workdir.path)")
+            removeWorkdir()
         }
         finishedAt = Date()
         slots.removeAll()
@@ -185,7 +204,8 @@ final class RunModel {
 
     private func downloadPhase() async throws -> [Int: DownloadedTrack] {
         phase = "download"
-        headline = "Downloading audio and artwork"
+        headline = "Downloading Songs"
+        detail = "Finding each song and downloading its audio and artwork"
         let request = DownloadRequest(tracks: config.searchTracks, workers: config.workers, workdir: workdir.path)
         let process = BridgeProcess(environment: environment, arguments: ["download"])
         bridge = process
@@ -230,7 +250,7 @@ final class RunModel {
             if let f = ev.fraction, ev.trackStatus == "downloading" {
                 let row = rows.first { $0.id == ev.trackIndex }
                 let label = row.map { "\($0.artist) - \($0.title)" } ?? ev.trackLabel ?? ""
-                slots[slot] = Slot(id: slot, label: label, fraction: f, phase: "download")
+                slots[slot] = Slot(id: slot, trackIndex: ev.trackIndex, label: label, fraction: f, phase: "download")
             } else {
                 slots[slot] = nil
             }
@@ -238,7 +258,8 @@ final class RunModel {
         if let index = ev.trackIndex, let status = ev.trackStatus {
             setRow(index, phase: "download", status: status)
         }
-        headline = "Downloading audio and artwork (\(ev.completed)/\(ev.total))"
+        headline = "Downloading Songs"
+        detail = "\(ev.completed) of \(ev.total) downloaded"
         switch ev.trackStatus {
         case "ok": append(.success, ev.message)
         case "failed": append(.error, ev.message)
@@ -254,7 +275,8 @@ final class RunModel {
 
     private func renderPhase(_ downloads: [Int: DownloadedTrack]) async throws -> [(BridgeTrack, String)] {
         phase = "render"
-        headline = "Preparing to render"
+        headline = "Rendering Video"
+        detail = "Preparing…"
         let codec: VideoCodec = config.gpu == "h264" ? .h264 : .hevc
         append(.info, "Encoder: \(codec.summary); compositing on \(GPU.device?.name ?? "the CPU")")
 
@@ -290,7 +312,7 @@ final class RunModel {
         let workers = max(1, config.renderWorkers ?? min(prepared.count, max(2, min(4, cores / 2))))
         renderTotal = prepared.count
         renderCompleted = 0
-        headline = "Rendering (0/\(prepared.count))"
+        detail = "0 of \(prepared.count) songs rendered"
         append(.info, "Rendering \(prepared.count) clip(s), \(workers) at a time")
 
         var finished: [Int: String] = [:]
@@ -306,7 +328,7 @@ final class RunModel {
                     let clip = prepared[i]
                     let index = clip.track.index ?? i + 1
                     setRow(index, phase: "render", status: "rendering")
-                    slots[slot] = Slot(id: slot, label: clip.track.label, fraction: 0, phase: "render")
+                    slots[slot] = Slot(id: slot, trackIndex: index, label: clip.track.label, fraction: 0, phase: "render")
                     renderFractions[slot] = 0
                     let report: @Sendable (Double) -> Void = { [weak self] fraction in
                         Task { @MainActor [weak self] in self?.renderTick(slot: slot, fraction: fraction) }
@@ -338,7 +360,7 @@ final class RunModel {
                     setRow(index, phase: "render", status: "failed")
                     append(.error, "Failed \(clip.track.label): \(error.localizedDescription)")
                 }
-                headline = "Rendering (\(renderCompleted)/\(renderTotal))"
+                detail = "\(renderCompleted) of \(renderTotal) songs rendered"
                 updateRenderProgress()
             }
         }
@@ -365,13 +387,15 @@ final class RunModel {
 
     private func concatPhase(_ clips: [(BridgeTrack, String)]) async throws -> Output {
         phase = "concat"
-        headline = "Stitching \(clips.count) clip(s)"
+        headline = "Finishing Up"
+        detail = "Joining \(clips.count) songs into one video"
         progress.advance(to: 0.95)
         let outputPath = config.output
         let entries = clips.map { (title: $0.0.title, artist: $0.0.artist, clipPath: $0.1) }
         try FileManager.default.createDirectory(
             at: URL(fileURLWithPath: outputPath).deletingLastPathComponent(), withIntermediateDirectories: true
         )
+        startedWritingOutput = true
         try await Media.concat(entries.map(\.clipPath), to: outputPath)
         let description = try await Media.writeDescription(entries: entries, videoPath: outputPath)
         return Output(videoPath: outputPath, descriptionPath: description.path, descriptionText: description.text)
@@ -397,7 +421,21 @@ final class RunModel {
         NSApp.dockTile.badgeLabel = "\(percent)%"
     }
 
+    /// Delete downloads, artwork and clips. yt-dlp may still be flushing a
+    /// file as it's cancelled, so sweep again a moment later.
     private func removeWorkdir() {
-        try? FileManager.default.removeItem(at: workdir)
+        let dir = workdir
+        try? FileManager.default.removeItem(at: dir)
+        Task.detached {
+            try? await Task.sleep(for: .seconds(3))
+            try? FileManager.default.removeItem(at: dir)
+        }
+    }
+
+    private func removePartialOutput() {
+        guard startedWritingOutput, output == nil else { return }
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: config.output)
+        try? fm.removeItem(atPath: (config.output as NSString).deletingPathExtension + "_description.txt")
     }
 }

@@ -1,87 +1,146 @@
 import AppKit
 import SwiftUI
 
+/// Progress for a run: a compact status header, the song list with inline
+/// progress (like Music's downloads or a Finder copy), and the log behind
+/// "Show Details".
 struct RunView: View {
     @Environment(AppModel.self) private var model
     let run: RunModel
+    @State private var showDetails = false
+    @State private var showChapters = false
 
     var body: some View {
-        VSplitView {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                if let output = run.output {
-                    ResultBanner(output: output)
-                }
-                HStack(alignment: .top, spacing: 14) {
-                    if let output = run.output {
-                        DescriptionBox(output: output)
-                            .frame(width: 340)
-                    } else {
-                        GroupBox("Active") { slots }
-                            .frame(width: 340)
-                    }
-                    GroupBox("Tracks") {
-                        RunTableView(rows: run.rows)
-                            .frame(minHeight: 140)
-                    }
-                }
-                .frame(maxHeight: .infinity)
-            }
-            .padding(16)
-            .frame(minHeight: 320)
-
-            LogTextView(lines: run.log)
-                .frame(minHeight: 90, idealHeight: 150)
+        VStack(spacing: 0) {
+            RunHeader(run: run)
+            Divider()
+            SongProgressList(run: run)
+            Divider()
+            details
         }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                if run.isActive {
+            if run.isActive {
+                ToolbarItem(placement: .primaryAction) {
                     Button(role: .cancel) {
                         run.cancel()
                     } label: {
                         Label("Stop", systemImage: "stop.fill")
-                            .labelStyle(.titleAndIcon)
                     }
-                    .buttonStyle(.glass)
                     .disabled(run.state == .cancelling)
-                    .help("Stop downloading and rendering (⌘.)")
-                } else {
+                    .help("Stop and delete the files made so far (⌘.)")
+                }
+            } else {
+                if let output = run.output {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            showChapters.toggle()
+                        } label: {
+                            Label("Chapters", systemImage: "list.bullet.rectangle")
+                        }
+                        .help("YouTube chapters for the description")
+                        .popover(isPresented: $showChapters, arrowEdge: .bottom) {
+                            ChaptersPopover(output: output)
+                        }
+                    }
+                }
+                ToolbarItem(placement: .navigation) {
                     Button {
                         model.closeRun()
                     } label: {
                         Label("Back to Songs", systemImage: "chevron.backward")
-                            .labelStyle(.titleAndIcon)
                     }
-                    .buttonStyle(.glass)
                     .help("Return to the song list (⌘[)")
                 }
             }
         }
-        .navigationTitle("Playlist Gen")
-        .navigationSubtitle(URL(fileURLWithPath: run.config.output).lastPathComponent)
+        .navigationTitle(URL(fileURLWithPath: run.config.output).lastPathComponent)
+        .navigationSubtitle("\(run.config.tracks.count) songs · \(run.config.width)×\(run.config.height)")
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
+    private var details: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    withAnimation(.snappy) { showDetails.toggle() }
+                } label: {
+                    Label(showDetails ? "Hide Details" : "Show Details", systemImage: "chevron.right")
+                        .labelStyle(DisclosureLabelStyle(expanded: showDetails))
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            if showDetails {
+                LogTextView(lines: run.log)
+                    .frame(height: 170)
+                    .background(.background.secondary)
+            }
+        }
+    }
+}
+
+/// Chevron that rotates like a disclosure triangle.
+private struct DisclosureLabelStyle: LabelStyle {
+    var expanded: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            configuration.icon
+                .font(.caption.weight(.semibold))
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+            configuration.title
+        }
+        .foregroundStyle(.secondary)
+    }
+}
+
+private struct RunHeader: View {
+    let run: RunModel
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
             statusIcon
-                .font(.system(size: 26))
-                .frame(width: 32)
-            VStack(alignment: .leading, spacing: 6) {
+                .font(.system(size: 30))
+                .frame(width: 36, height: 36)
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(run.headline)
                         .font(.title3.weight(.semibold))
                     Spacer()
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(timing(now: context.date))
-                            .font(.callout.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                    if run.isActive {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(timing(now: context.date))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
                     }
                 }
-                ProgressView(value: run.progress.value)
-                    .progressViewStyle(.linear)
-                    .tint(tint)
+                if run.isActive {
+                    ProgressView(value: run.progress.value)
+                        .progressViewStyle(.linear)
+                }
+                HStack(alignment: .center) {
+                    Text(run.detail)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                    Spacer()
+                    if run.isActive {
+                        StepIndicator(phase: run.phase)
+                    } else if let output = run.output {
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: output.videoPath)])
+                        }
+                        Button("Play") {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: output.videoPath))
+                        }
+                        .keyboardShortcut(.defaultAction)
+                    }
+                }
             }
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
     }
 
     @ViewBuilder
@@ -89,131 +148,201 @@ struct RunView: View {
         switch run.state {
         case .running, .cancelling:
             Image(systemName: run.phase == "download" ? "arrow.down.circle" : run.phase == "concat" ? "square.stack.3d.down.right" : "film")
-                .foregroundStyle(Color.accentColor)
-                .symbolEffect(.pulse, options: .repeating)
+                .foregroundStyle(.tint)
+                .symbolRenderingMode(.hierarchical)
         case .finished:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .symbolRenderingMode(.hierarchical)
         case .failed:
-            Image(systemName: "xmark.octagon.fill").foregroundStyle(.red)
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .symbolRenderingMode(.multicolor)
         case .cancelled:
-            Image(systemName: "stop.circle").foregroundStyle(.secondary)
-        }
-    }
-
-    private var tint: Color {
-        switch run.state {
-        case .finished: .green
-        case .failed: .red
-        case .cancelled, .cancelling: .secondary
-        case .running: .accentColor
+            Image(systemName: "stop.circle")
+                .foregroundStyle(.secondary)
         }
     }
 
     private func timing(now: Date) -> String {
-        let end = run.finishedAt ?? now
-        let elapsed = end.timeIntervalSince(run.startedAt)
-        var text = "Elapsed \(formatDuration(elapsed))"
+        let elapsed = now.timeIntervalSince(run.startedAt)
         let p = run.progress.value
-        if run.isActive, p > 0.03, p < 1 {
-            text += " · about \(formatDuration(elapsed * (1 - p) / p)) left"
+        if p > 0.03, p < 1 {
+            return "About \(formatLongDuration(elapsed * (1 - p) / p)) left"
         }
-        return text
-    }
-
-    @ViewBuilder
-    private var slots: some View {
-        let active = run.slots.values.sorted { $0.id < $1.id }
-        if active.isEmpty {
-            Text(run.isActive ? "Waiting…" : "Idle")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(active) { slot in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Image(systemName: slot.phase == "download" ? "arrow.down" : "film")
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 14)
-                                Text(slot.label)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer()
-                                Text("\(Int(slot.fraction * 100))%")
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                            }
-                            .font(.callout)
-                            ProgressView(value: slot.fraction)
-                                .controlSize(.small)
-                        }
-                    }
-                }
-                .padding(4)
-            }
-        }
+        return formatDuration(elapsed)
     }
 }
 
-private struct ResultBanner: View {
-    let output: RunModel.Output
+/// Download › Render › Finish, with the current step emphasised.
+private struct StepIndicator: View {
+    let phase: String
+    private let steps = [("download", "Download"), ("render", "Render"), ("concat", "Finish")]
+
+    var body: some View {
+        let current = steps.firstIndex { $0.0 == phase } ?? 0
+        HStack(spacing: 6) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
+                if i > 0 {
+                    Image(systemName: "chevron.compact.right")
+                        .foregroundStyle(.tertiary)
+                }
+                HStack(spacing: 4) {
+                    Image(systemName: i < current ? "checkmark.circle.fill" : i == current ? "circle.dotted.circle" : "circle")
+                        .foregroundStyle(i < current ? AnyShapeStyle(.green) : i == current ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                        .symbolEffect(.pulse, isActive: i == current)
+                    Text(step.1)
+                        .fontWeight(i == current ? .semibold : .regular)
+                        .foregroundStyle(i == current ? .primary : .secondary)
+                }
+            }
+        }
+        .font(.callout)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Step \(current + 1) of 3: \(steps[current].1)")
+    }
+}
+
+/// Every song with artwork and its own status / progress.
+private struct SongProgressList: View {
+    let run: RunModel
+
+    var body: some View {
+        let fractions = Dictionary(
+            run.slots.values.compactMap { slot in slot.trackIndex.map { ($0, slot.fraction) } },
+            uniquingKeysWith: max
+        )
+        List(run.rows) { row in
+            SongProgressRow(
+                row: row, track: run.track(index: row.id), fraction: fractions[row.id]
+            )
+        }
+        .listStyle(.inset)
+        .alternatingRowBackgrounds()
+        .environment(\.defaultMinListRowHeight, 48)
+    }
+}
+
+private struct SongProgressRow: View {
+    let row: RunModel.Row
+    let track: BridgeTrack?
+    let fraction: Double?
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(Color.accentColor)
+            Text("\(row.id)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .trailing)
+            ArtworkThumbnail(urlString: track?.artworkUrl)
+                .frame(width: 36, height: 36)
             VStack(alignment: .leading, spacing: 2) {
-                Text(URL(fileURLWithPath: output.videoPath).lastPathComponent)
-                    .font(.headline)
-                Text(output.videoPath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Text(row.title).lineLimit(1)
+                Text(row.artist).foregroundStyle(.secondary).lineLimit(1)
             }
-            Spacer()
-            Button("Show in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: output.videoPath)])
-            }
-            .buttonStyle(.glass)
-            Button("Play", systemImage: "play.fill") {
-                NSWorkspace.shared.open(URL(fileURLWithPath: output.videoPath))
-            }
-            .buttonStyle(.glassProminent)
-            .keyboardShortcut(.defaultAction)
+            Spacer(minLength: 16)
+            status
+                .frame(width: 190, alignment: .trailing)
         }
-        .controlSize(.large)
-        .padding(14)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        let (text, symbol, color) = Self.describe(row)
+        if let fraction, row.status == "downloading" || row.status == "rendering" {
+            HStack(spacing: 8) {
+                ProgressView(value: fraction)
+                    .frame(width: 110)
+                    .controlSize(.small)
+                Text("\(Int(fraction * 100))%")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .help(text)
+        } else {
+            Label(text, systemImage: symbol)
+                .foregroundStyle(color)
+                .labelStyle(.titleAndIcon)
+        }
+    }
+
+    /// Human wording + symbol + colour for a (phase, status) pair.
+    static func describe(_ row: RunModel.Row) -> (String, String, Color) {
+        switch (row.phase, row.status) {
+        case ("download", "pending"): ("Waiting", "clock", .secondary)
+        case ("download", "downloading"): ("Downloading", "arrow.down.circle", .accentColor)
+        case ("download", "ok"): ("Downloaded", "arrow.down.circle.fill", .secondary)
+        case ("render", "pending"): ("Ready to Render", "clock", .secondary)
+        case ("render", "rendering"): ("Rendering", "film", .accentColor)
+        case ("render", "ok"): ("Done", "checkmark.circle.fill", .green)
+        case (_, "skipped"): ("Not Found on YouTube", "exclamationmark.circle", .orange)
+        case (_, "failed"): ("Failed", "xmark.octagon.fill", .red)
+        case (_, "cancelled"): ("Stopped", "stop.circle", .secondary)
+        default: (row.status.capitalized, "circle", .secondary)
+        }
     }
 }
 
-private struct DescriptionBox: View {
+/// Album artwork from Apple Music (cached on disk), with a placeholder.
+struct ArtworkThumbnail: View {
+    let urlString: String?
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(.quaternary)
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Image(systemName: "music.note")
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(.primary.opacity(0.08), lineWidth: 0.5)
+        }
+        .task(id: urlString) {
+            guard let path = await ArtworkCache.shared.localPath(for: urlString) else { return }
+            image = NSImage(contentsOfFile: path)
+        }
+    }
+}
+
+private struct ChaptersPopover: View {
     let output: RunModel.Output
     @State private var copied = false
 
     var body: some View {
-        GroupBox {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("YouTube Chapters")
+                .font(.headline)
             ScrollView {
                 Text(output.descriptionText)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(4)
             }
-        } label: {
+            .frame(width: 380, height: 260)
             HStack {
-                Text("YouTube Chapters")
+                Text("Also saved next to the video.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button(copied ? "Copied" : "Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(output.descriptionText, forType: .string)
                     copied = true
                 }
-                .controlSize(.small)
+                .keyboardShortcut("c", modifiers: [.command, .shift])
             }
         }
+        .padding(16)
     }
 }

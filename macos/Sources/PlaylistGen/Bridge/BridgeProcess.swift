@@ -78,16 +78,49 @@ final class BridgeProcess {
         if process.isRunning { process.terminate() }
     }
 
+    /// Delivers each line as soon as it arrives. (`FileHandle.bytes.lines`
+    /// buffers pipe reads in large chunks, which held back progress updates.)
     private nonisolated static func readLines(
         _ handle: FileHandle,
         _ body: @escaping @MainActor @Sendable (String) -> Void
     ) async {
-        do {
-            for try await line in handle.bytes.lines {
-                await body(line)
+        let (lines, continuation) = AsyncStream<String>.makeStream()
+        let splitter = LineSplitter()
+        handle.readabilityHandler = { h in
+            let data = h.availableData
+            if data.isEmpty {
+                h.readabilityHandler = nil
+                if let tail = splitter.flush() { continuation.yield(tail) }
+                continuation.finish()
+            } else {
+                for line in splitter.append(data) { continuation.yield(line) }
             }
-        } catch {
-            // Pipe closed or read failed; the exit status tells the rest.
         }
+        for await line in lines {
+            await body(line)
+        }
+    }
+}
+
+/// Splits a byte stream into UTF-8 lines (\n or \r, so yt-dlp-style
+/// carriage-return progress shows up too). Only touched from one
+/// readability-handler queue at a time.
+private final class LineSplitter: @unchecked Sendable {
+    private var buffer = Data()
+
+    func append(_ data: Data) -> [String] {
+        buffer.append(data)
+        var lines: [String] = []
+        while let i = buffer.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
+            let line = buffer[buffer.startIndex..<i]
+            buffer.removeSubrange(buffer.startIndex...i)
+            if !line.isEmpty { lines.append(String(decoding: line, as: UTF8.self)) }
+        }
+        return lines
+    }
+
+    func flush() -> String? {
+        defer { buffer.removeAll() }
+        return buffer.isEmpty ? nil : String(decoding: buffer, as: UTF8.self)
     }
 }
