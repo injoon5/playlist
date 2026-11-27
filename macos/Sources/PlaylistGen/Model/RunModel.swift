@@ -92,10 +92,13 @@ final class RunModel {
         let text: String
     }
 
-    struct Output: Equatable {
+    struct Output: Equatable, Codable {
         var videoPath: String
         var descriptionPath: String
-        var descriptionText: String
+        var chapters: YouTubeChapters
+
+        /// Ready to paste into a YouTube description.
+        var descriptionText: String { chapters.text }
     }
 
     let config: RunConfig
@@ -109,6 +112,8 @@ final class RunModel {
     private(set) var slots: [Int: Slot] = [:]
     private(set) var log: [LogLine] = []
     private(set) var output: Output?
+    /// Called once the video is written.
+    var onFinished: ((Output) -> Void)?
     let startedAt = Date()
     private(set) var finishedAt: Date?
 
@@ -183,7 +188,9 @@ final class RunModel {
             try checkCancelled()
             let clips = try await renderPhase(downloads)
             try checkCancelled()
-            output = try await concatPhase(clips)
+            let finished = try await concatPhase(clips)
+            output = finished
+            onFinished?(finished)
             state = .finished
             phase = "done"
             headline = "Video Ready"
@@ -427,7 +434,7 @@ final class RunModel {
         startedWritingOutput = true
         try await Media.concat(entries.map(\.clipPath), to: outputPath)
         let description = try await Media.writeDescription(entries: entries, videoPath: outputPath)
-        return Output(videoPath: outputPath, descriptionPath: description.path, descriptionText: description.text)
+        return Output(videoPath: outputPath, descriptionPath: description.path, chapters: description.chapters)
     }
 
     // MARK: - Helpers

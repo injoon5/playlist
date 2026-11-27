@@ -60,6 +60,8 @@ final class AppModel {
 
     // Run
     private(set) var run: RunModel?
+    /// The last video made (kept across launches), for copying its chapters.
+    private(set) var lastOutput: RunModel.Output? = AppModel.loadLastOutput()
 
     static let imageExtensions: Set<String> = ["jpeg", "jpg", "png", "webp", "gif", "bmp", "heic", "tiff"]
 
@@ -389,17 +391,51 @@ final class AppModel {
             workers: settings.workers, renderWorkers: settings.renderWorkers,
             gpu: settings.gpu, transitionDuration: settings.transitionDuration
         )
-        let model = RunModel(config: config, tools: tools)
-        run = model
-        model.start()
+        start(RunModel(config: config, tools: tools))
     }
 
     /// Run the same video again after a failure or a stop.
     func retryRun() {
         guard let previous = run, !previous.isActive, let tools else { return }
-        let model = RunModel(config: previous.config, tools: tools)
+        start(RunModel(config: previous.config, tools: tools))
+    }
+
+    private func start(_ model: RunModel) {
+        model.onFinished = { [weak self] output in self?.remember(output) }
         run = model
         model.start()
+    }
+
+    // MARK: - Chapters
+
+    /// The video whose chapters Copy YouTube Chapters copies: the one on
+    /// screen, else the last one made (while it still exists).
+    var chaptersOutput: RunModel.Output? {
+        if let output = run?.output { return output }
+        guard run == nil, let lastOutput, FileManager.default.fileExists(atPath: lastOutput.videoPath) else { return nil }
+        return lastOutput
+    }
+
+    func copyChapters() {
+        guard let output = chaptersOutput else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(output.descriptionText, forType: .string)
+    }
+
+    private static var lastOutputURL: URL {
+        sessionURL.deletingLastPathComponent().appending(path: "last-video.json")
+    }
+
+    private static func loadLastOutput() -> RunModel.Output? {
+        guard let data = try? Data(contentsOf: lastOutputURL) else { return nil }
+        return try? JSONDecoder().decode(RunModel.Output.self, from: data)
+    }
+
+    private func remember(_ output: RunModel.Output) {
+        lastOutput = output
+        let url = Self.lastOutputURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? JSONEncoder().encode(output).write(to: url, options: .atomic)
     }
 
     func closeRun() {

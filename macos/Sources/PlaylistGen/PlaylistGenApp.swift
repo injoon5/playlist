@@ -44,6 +44,12 @@ struct PlaylistCommands: Commands {
             .keyboardShortcut("r", modifiers: [.command, .option])
             .disabled(model.run?.output == nil)
         }
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Button("Copy YouTube Chapters") { model.copyChapters() }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                .disabled(model.chaptersOutput == nil)
+        }
         CommandMenu("Playlist") {
             Button("Load Playlist") { model.loadTracks() }
                 .keyboardShortcut("l")

@@ -67,10 +67,11 @@ struct TimingTests {
     }
 
     @Test func chapterTimestamps() {
-        #expect(formatTimestamp(0) == "0:00")
-        #expect(formatTimestamp(65) == "1:05")
-        #expect(formatTimestamp(3599) == "59:59")
-        #expect(formatTimestamp(3661) == "1:01:01")
+        #expect(YouTubeChapters.timestamp(0, long: false) == "00:00")
+        #expect(YouTubeChapters.timestamp(65.9, long: false) == "01:05")
+        #expect(YouTubeChapters.timestamp(3599, long: false) == "59:59")
+        #expect(YouTubeChapters.timestamp(0, long: true) == "00:00:00")
+        #expect(YouTubeChapters.timestamp(3661, long: true) == "01:01:01")
     }
 }
 
@@ -375,4 +376,36 @@ func writeTone(to url: URL, seconds: Double, settings: [String: Any]? = nil, sam
         for i in 0..<Int(frames) { data[i] = Float(sin(Double(i) * 2 * .pi * 440 / sampleRate) * 0.2) }
     }
     try file.write(from: buffer)
+}
+
+@Suite("YouTube chapters")
+struct ChapterTests {
+    @Test func formatsLikeYouTubeExpects() {
+        let chapters = YouTubeChapters([
+            .init(title: "Blueming", artist: "IU", start: 0),
+            .init(title: "Ditto <Remix>", artist: "NewJeans", start: 230.07),
+            .init(title: "Line\nBreak", artist: "", start: 415.6),
+        ], totalDuration: 665.7)
+        #expect(chapters.text == "00:00 Blueming - IU\n03:50 Ditto ‹Remix› - NewJeans\n06:55 Line Break\n")
+        #expect(chapters.problems.isEmpty)
+    }
+
+    @Test func longVideosUseHoursOnEveryLine() {
+        let chapters = YouTubeChapters([
+            .init(title: "A", artist: "X", start: 0),
+            .init(title: "B", artist: "X", start: 1800),
+            .init(title: "C", artist: "X", start: 3725),
+        ], totalDuration: 4000)
+        #expect(chapters.text == "00:00:00 A - X\n00:30:00 B - X\n01:02:05 C - X\n")
+    }
+
+    @Test func reportsWhatYouTubeWouldReject() {
+        let two = YouTubeChapters([.init(title: "A", artist: "", start: 0), .init(title: "B", artist: "", start: 60)], totalDuration: 120)
+        #expect(two.problems.count == 1)
+        let short = YouTubeChapters([
+            .init(title: "A", artist: "", start: 0), .init(title: "Tiny", artist: "", start: 60),
+            .init(title: "C", artist: "", start: 65),
+        ], totalDuration: 200)
+        #expect(short.problems.first?.contains("Tiny") == true)
+    }
 }

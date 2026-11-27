@@ -149,6 +149,7 @@ private struct RunHeader: View {
                         .help("Show the video in Finder (⌥⌘R)")
                         Button("Save a Copy…") { Task { await Panels.saveCopy(of: output) } }
                             .help("Save another copy of the video and its chapters (⇧⌘S)")
+                        CopyChaptersButton(output: output)
                         Button("Play") {
                             NSWorkspace.shared.open(URL(fileURLWithPath: output.videoPath))
                         }
@@ -352,9 +353,30 @@ struct ArtworkThumbnail: View {
     }
 }
 
-private struct ChaptersPopover: View {
+/// Copies the YouTube chapters, confirming in place for a moment.
+private struct CopyChaptersButton: View {
+    @Environment(AppModel.self) private var model
     let output: RunModel.Output
     @State private var copied = false
+
+    var body: some View {
+        Button {
+            model.copyChapters()
+            withAnimation(.snappy) { copied = true }
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                withAnimation(.snappy) { copied = false }
+            }
+        } label: {
+            Label(copied ? "Copied" : "Copy Chapters", systemImage: copied ? "checkmark" : "doc.on.doc")
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .help(output.chapters.problems.first ?? "Copy the song list as YouTube chapters, ready to paste into the description (⇧⌘C)")
+    }
+}
+
+private struct ChaptersPopover: View {
+    let output: RunModel.Output
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -367,17 +389,19 @@ private struct ChaptersPopover: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(width: 380, height: 260)
+            ForEach(output.chapters.problems, id: \.self) { problem in
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .frame(width: 380, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
-                Text("Also saved next to the video.")
+                Text("Paste into the video’s description. Also saved next to the video.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button(copied ? "Copied" : "Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(output.descriptionText, forType: .string)
-                    copied = true
-                }
-                .keyboardShortcut("c", modifiers: [.command, .shift])
+                CopyChaptersButton(output: output)
             }
         }
         .padding(16)

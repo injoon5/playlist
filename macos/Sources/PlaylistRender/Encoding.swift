@@ -298,21 +298,22 @@ public enum Media {
         try await export.export(to: url, as: .mp4)
     }
 
-    /// Ready-to-paste YouTube chapters, `{timestamp} {title} - {artist}`,
-    /// written next to the video as `<name>_description.txt`.
+    /// Ready-to-paste YouTube chapters, written next to the video as
+    /// `<name>_description.txt`. Each chapter starts where its clip starts in
+    /// the joined video (the clips' own durations, as `concat` lays them out).
     public static func writeDescription(
         entries: [(title: String, artist: String, clipPath: String)], videoPath: String
-    ) async throws -> (path: String, text: String) {
-        var lines: [String] = []
+    ) async throws -> (path: String, chapters: YouTubeChapters) {
+        var chapters: [YouTubeChapters.Chapter] = []
         var t = 0.0
         for entry in entries {
-            lines.append("\(formatTimestamp(t)) \(entry.title) - \(entry.artist)")
+            chapters.append(.init(title: entry.title, artist: entry.artist, start: t))
             t += try await duration(of: entry.clipPath)
         }
-        let text = lines.joined(separator: "\n") + "\n"
+        let result = YouTubeChapters(chapters, totalDuration: t)
         let path = (videoPath as NSString).deletingPathExtension + "_description.txt"
-        try text.write(toFile: path, atomically: true, encoding: .utf8)
-        return (path, text)
+        try result.text.write(toFile: path, atomically: true, encoding: .utf8)
+        return (path, result)
     }
 }
 
@@ -443,13 +444,4 @@ private final class ClipFeeder: @unchecked Sendable {
         }
         audio.finish()
     }
-}
-
-/// m:ss, switching to h:mm:ss past one hour.
-public func formatTimestamp(_ seconds: Double) -> String {
-    let s = Int(seconds)
-    if s >= 3600 {
-        return String(format: "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
-    }
-    return String(format: "%d:%02d", s / 60, s % 60)
 }
