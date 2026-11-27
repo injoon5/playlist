@@ -5,7 +5,11 @@ import Foundation
 public enum YTDLP {
     /// YouTube's bot check ("Sign in to confirm you're not a bot") hits some
     /// clients more than others; each download tries these in order.
-    public static let clientFallbacks = ["android", "ios", "tv_embedded", "web"]
+    /// yt-dlp's own default set comes first: as of yt-dlp 2026.11 it is the
+    /// only one YouTube serves (forcing a single client fails with "format not
+    /// available"), and it yields the best stream (Opus ~130 kbps), which the
+    /// renderer copies into the video untouched.
+    public static let clientFallbacks = ["default", "ios", "android", "web"]
     /// Errors that mean "this client was blocked", for the failure hint.
     public static let retryablePatterns = ["sign in to confirm", "not a bot", "requested format is not available"]
     /// How far a hit's duration may drift from Apple Music's before it's

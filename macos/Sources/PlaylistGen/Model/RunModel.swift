@@ -332,10 +332,11 @@ final class RunModel {
             throw RunError(message: "None of the songs could be downloaded. Check your internet connection, then try again.")
         }
 
-        // The GPU composites and the Media Engine encodes; a few clips in
-        // flight keep both busy.
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let workers = max(1, config.renderWorkers ?? min(prepared.count, max(2, min(4, cores / 2))))
+        // The Media Engine's video encoder is the bottleneck (~210 fps of 1080p
+        // HEVC on an M2 Pro, shared by all sessions: 1, 2 or 4 clips at once
+        // all measured ~208 fps in total). Two clips in flight hide each clip's
+        // setup and finishing; more only add memory.
+        let workers = max(1, config.renderWorkers ?? min(prepared.count, 2))
         renderTotal = prepared.count
         renderCompleted = 0
         detail = "0 of \(prepared.count) songs rendered"

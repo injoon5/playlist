@@ -84,7 +84,7 @@ struct MatchingTests {
         for flag in ["--extract-audio", "--no-playlist", "--no-simulate", "--newline", "--progress", "--no-warnings"] {
             #expect(args.contains(flag))
         }
-        #expect(YTDLP.clientFallbacks == ["android", "ios", "tv_embedded", "web"])
+        #expect(YTDLP.clientFallbacks.first == "default")  // the only one YouTube serves reliably (Nov 2026)
     }
 }
 

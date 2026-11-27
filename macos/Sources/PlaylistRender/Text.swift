@@ -127,18 +127,21 @@ func makeLine(_ text: String, font: CTFont, color: CGColor, tabularDigits: Bool 
         NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
     ]
     if tabularDigits {
-        // Fixed-advance figures so the time labels don't jitter as digits change.
-        let features: [[CFString: Any]] = [[
-            kCTFontFeatureTypeIdentifierKey: kNumberSpacingType,
-            kCTFontFeatureSelectorIdentifierKey: kMonospacedNumbersSelector,
-        ]]
-        let descriptor = CTFontDescriptorCreateWithAttributes(
-            [kCTFontFeatureSettingsAttribute: features] as CFDictionary
-        )
-        attributes[NSAttributedString.Key(kCTFontAttributeName as String)] =
-            CTFontCreateCopyWithAttributes(font, CTFontGetSize(font), nil, descriptor)
+        attributes[NSAttributedString.Key(kCTFontAttributeName as String)] = tabularDigitsFont(font)
     }
     return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+}
+
+/// `font` with fixed-advance figures, so the time labels don't jitter as digits change.
+func tabularDigitsFont(_ font: CTFont) -> CTFont {
+    let features: [[CFString: Any]] = [[
+        kCTFontFeatureTypeIdentifierKey: kNumberSpacingType,
+        kCTFontFeatureSelectorIdentifierKey: kMonospacedNumbersSelector,
+    ]]
+    let descriptor = CTFontDescriptorCreateWithAttributes(
+        [kCTFontFeatureSettingsAttribute: features] as CFDictionary
+    )
+    return CTFontCreateCopyWithAttributes(font, CTFontGetSize(font), nil, descriptor)
 }
 
 /// Height PIL reports for `textbbox((0, 0), "Ag")[3]`: ascender line down to

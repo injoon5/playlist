@@ -52,6 +52,13 @@ public final class TrackRenderer {
     private var staticLayers = StaticLayers(base: nil, foreground: nil, texts: [])
     private let marquees: [Marquee]
     private var marqueeImages: [(glyphs: CIImage, shadow: CIImage?)] = []
+    /// Per-frame overlays are cached while their inputs don't change: the
+    /// time labels change once a second, the edge-fade mask only while the
+    /// left fade eases in or out. Reusing the same CIImage also lets Core
+    /// Image reuse its GPU texture instead of uploading a new one per frame.
+    private var labelCache: (left: String, right: String, image: CIImage)?
+    private var maskCache: [Int: (leftAmount: Double, image: CIImage)] = [:]
+    private lazy var progressGeometry = ProgressGeometry(layout: layout, height: height)
 
     private struct StaticLayers {
         /// Still path: background + foreground + static text, flattened.
@@ -229,7 +236,7 @@ public final class TrackRenderer {
         }
 
         for (i, marquee) in marquees.enumerated() {
-            image = drawMarquee(marquee, images: marqueeImages[i], at: t, over: image)
+            image = drawMarquee(marquee, index: i, at: t, over: image)
         }
         image = drawProgress(at: t, over: image)
         image = applyTransition(at: t, to: image)
@@ -254,9 +261,8 @@ public final class TrackRenderer {
     /// Continuous wraparound scroll through the (text + gap) tile at
     /// sub-pixel offsets, so the motion is smooth. Python stepped by whole
     /// pixels, which at ~0.93 px/frame made the scroll visibly stutter.
-    private func drawMarquee(
-        _ marquee: Marquee, images: (glyphs: CIImage, shadow: CIImage?), at t: Double, over image: CIImage
-    ) -> CIImage {
+    private func drawMarquee(_ marquee: Marquee, index: Int, at t: Double, over image: CIImage) -> CIImage {
+        let images = marqueeImages[index]
         let state = marqueeState(t: t, tileWidth: marquee.tileWidth)
         let offset = state.offset.truncatingRemainder(dividingBy: marquee.tileWidth)
         let window = ciRect(marquee.window)
@@ -273,15 +279,21 @@ public final class TrackRenderer {
         }
 
         // Edge fades: a 1-pixel-tall alpha profile stretched over the window.
-        let profile = marqueeFadeProfile(
-            width: Int(marquee.window.width.rounded()), fadeWidth: marquee.fadeWidth,
-            leftAmount: marqueeLeftFadeAmount(state)
-        )
-        let mask = CIImage(cgImage: Self.maskImage(profile))
-            .clampedToExtent()
-            .transformed(by: CGAffineTransform(scaleX: 1, y: window.height)
-                .concatenating(CGAffineTransform(translationX: window.minX, y: window.minY)))
-            .cropped(to: window)
+        let leftAmount = marqueeLeftFadeAmount(state)
+        let mask: CIImage
+        if let cached = maskCache[index], cached.leftAmount == leftAmount {
+            mask = cached.image
+        } else {
+            let profile = marqueeFadeProfile(
+                width: Int(marquee.window.width.rounded()), fadeWidth: marquee.fadeWidth, leftAmount: leftAmount
+            )
+            mask = CIImage(cgImage: Self.maskImage(profile))
+                .clampedToExtent()
+                .transformed(by: CGAffineTransform(scaleX: 1, y: window.height)
+                    .concatenating(CGAffineTransform(translationX: window.minX, y: window.minY)))
+                .cropped(to: window)
+            maskCache[index] = (leftAmount, mask)
+        }
         func masked(_ layer: CIImage) -> CIImage {
             layer.applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: CIImage.empty(),
@@ -307,51 +319,81 @@ public final class TrackRenderer {
 
     /// Progress bar plus elapsed / remaining labels: a small CPU overlay
     /// (two layers: vibrant track + labels, solid fill) placed on the GPU frame.
-    private func drawProgress(at t: Double, over image: CIImage) -> CIImage {
-        let duration = input.duration
-        let barW = CGFloat(layout.barWidth), barH = CGFloat(layout.barHeight)
-        let radius = barH / 2
+    /// Everything about the progress overlay that doesn't depend on time.
+    private struct ProgressGeometry {
+        let barW: CGFloat, barH: CGFloat, radius: CGFloat
         let pad: CGFloat = 2
-        let baselineY = CGFloat(layout.labelY - layout.barY) + CTFontGetAscent(layout.timeFont) + pad
-        let regionH = Int(ceil(baselineY + CTFontGetDescent(layout.timeFont) + 4))
-        let regionW = Int(barW + pad * 2)
-        let track = CGRect(x: pad, y: pad, width: barW, height: barH)
+        let baselineY: CGFloat
+        let regionW: Int, regionH: Int
+        let track: CGRect
+        let trackPath: CGPath
+        /// Labels layer and fill layer placements (Core Image, y-up).
+        let labelPlace: CGAffineTransform
+        let fillPlace: CGAffineTransform
+        let labelFont: CTFont
+        let labelColor = CGContext.rgba(255, 255, 255, 150)
+        let trackColor = CGContext.rgba(255, 255, 255, 55)
+        let fillColor = CGContext.rgba(255, 255, 255, 235)
 
-        let vibrantCtx = Imaging.makeContext(width: regionW, height: regionH)
-        vibrantCtx.addPath(CGPath(roundedRect: track, cornerWidth: radius, cornerHeight: radius, transform: nil))
-        vibrantCtx.setFillColor(CGContext.rgba(255, 255, 255, 55))
-        vibrantCtx.fillPath()
+        init(layout: Layout, height: Int) {
+            barW = CGFloat(layout.barWidth)
+            barH = CGFloat(layout.barHeight)
+            radius = barH / 2
+            baselineY = CGFloat(layout.labelY - layout.barY) + CTFontGetAscent(layout.timeFont) + pad
+            regionH = Int(ceil(baselineY + CTFontGetDescent(layout.timeFont) + 4))
+            regionW = Int(barW + pad * 2)
+            track = CGRect(x: pad, y: pad, width: barW, height: barH)
+            trackPath = CGPath(roundedRect: track, cornerWidth: radius, cornerHeight: radius, transform: nil)
+            let origin = CGPoint(x: CGFloat(layout.barX) - pad, y: CGFloat(layout.barY) - pad)
+            labelPlace = CGAffineTransform(translationX: origin.x, y: CGFloat(height) - origin.y - CGFloat(regionH))
+            fillPlace = CGAffineTransform(translationX: origin.x, y: CGFloat(height) - origin.y - (barH + pad * 2))
+            labelFont = tabularDigitsFont(layout.timeFont)
+        }
+    }
 
-        let color = CGContext.rgba(255, 255, 255, 150)
-        let left = makeLine(Self.clock(t), font: layout.timeFont, color: color, tabularDigits: true)
-        let right = makeLine("-" + Self.clock(max(duration - t, 0)), font: layout.timeFont, color: color, tabularDigits: true)
-        let rightWidth = CTLineGetTypographicBounds(right, nil, nil, nil)
-        vibrantCtx.textPosition = CGPoint(x: pad, y: baselineY)
-        CTLineDraw(left, vibrantCtx)
-        vibrantCtx.textPosition = CGPoint(x: pad + barW - rightWidth, y: baselineY)
-        CTLineDraw(right, vibrantCtx)
+    /// Progress bar plus elapsed / remaining labels: a small CPU overlay
+    /// (two layers: vibrant track + labels, solid fill) placed on the GPU frame.
+    private func drawProgress(at t: Double, over image: CIImage) -> CIImage {
+        let g = progressGeometry
+        let duration = input.duration
 
-        let origin = CGPoint(x: CGFloat(layout.barX) - pad, y: CGFloat(layout.barY) - pad)
-        let place = CGAffineTransform(translationX: origin.x, y: CGFloat(height) - origin.y - CGFloat(regionH))
-        var out = CIImage(cgImage: vibrantCtx.makeImage()!).transformed(by: place)
-            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: image])
+        // Track + labels: redrawn only when a label changes (once a second).
+        let leftText = Self.clock(t), rightText = "-" + Self.clock(max(duration - t, 0))
+        let labels: CIImage
+        if let cached = labelCache, cached.left == leftText, cached.right == rightText {
+            labels = cached.image
+        } else {
+            let ctx = Imaging.makeContext(width: g.regionW, height: g.regionH)
+            ctx.addPath(g.trackPath)
+            ctx.setFillColor(g.trackColor)
+            ctx.fillPath()
+            let left = makeLine(leftText, font: g.labelFont, color: g.labelColor)
+            let right = makeLine(rightText, font: g.labelFont, color: g.labelColor)
+            let rightWidth = CTLineGetTypographicBounds(right, nil, nil, nil)
+            ctx.textPosition = CGPoint(x: g.pad, y: g.baselineY)
+            CTLineDraw(left, ctx)
+            ctx.textPosition = CGPoint(x: g.pad + g.barW - rightWidth, y: g.baselineY)
+            CTLineDraw(right, ctx)
+            labels = CIImage(cgImage: ctx.makeImage()!).transformed(by: g.labelPlace)
+            labelCache = (leftText, rightText, labels)
+        }
+        var out = labels.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: image])
 
         let progress = duration <= 0 ? 0 : min(max(t / duration, 0), 1)
-        let fillW = barW * progress
+        let fillW = g.barW * progress
         if fillW > 0 {
             // Pill-shaped fill, clipped to the track so a sliver still looks right.
-            let fillCtx = Imaging.makeContext(width: regionW, height: Int(barH + pad * 2))
-            fillCtx.addPath(CGPath(roundedRect: track, cornerWidth: radius, cornerHeight: radius, transform: nil))
+            // It moves by a fraction of a pixel every frame, so it's drawn per frame
+            // (a few thousand pixels) to keep its anti-aliased edge exact.
+            let fillCtx = Imaging.makeContext(width: g.regionW, height: Int(g.barH + g.pad * 2))
+            fillCtx.addPath(g.trackPath)
             fillCtx.clip()
-            let fill = CGRect(x: pad, y: pad, width: max(fillW, barH), height: barH)
-                .offsetBy(dx: min(0, fillW - barH), dy: 0)
-            fillCtx.addPath(CGPath(roundedRect: fill, cornerWidth: radius, cornerHeight: radius, transform: nil))
-            fillCtx.setFillColor(CGContext.rgba(255, 255, 255, 235))
+            let fill = CGRect(x: g.pad, y: g.pad, width: max(fillW, g.barH), height: g.barH)
+                .offsetBy(dx: min(0, fillW - g.barH), dy: 0)
+            fillCtx.addPath(CGPath(roundedRect: fill, cornerWidth: g.radius, cornerHeight: g.radius, transform: nil))
+            fillCtx.setFillColor(g.fillColor)
             fillCtx.fillPath()
-            let fillPlace = CGAffineTransform(
-                translationX: origin.x, y: CGFloat(height) - origin.y - (barH + pad * 2)
-            )
-            out = CIImage(cgImage: fillCtx.makeImage()!).transformed(by: fillPlace).composited(over: out)
+            out = CIImage(cgImage: fillCtx.makeImage()!).transformed(by: g.fillPlace).composited(over: out)
         }
         return out
     }
@@ -362,12 +404,22 @@ public final class TrackRenderer {
         return String(format: "%d:%02d", Int(s / 60), Int(s.truncatingRemainder(dividingBy: 60)))
     }
 
+    /// Length of the dip through black at each end of the clip, nil if none.
+    static func fadeDuration(of input: TrackRenderInput) -> Double? {
+        guard input.transitionDuration > 0, input.duration > 0 else { return nil }
+        return min(input.transitionDuration, max(0.05, input.duration / 2 - 0.05))
+    }
+
+    /// When the fade-in is over and the picture is steady (nil: from the start).
+    static func firstSteadyTime(of input: TrackRenderInput) -> Double? {
+        fadeDuration(of: input)
+    }
+
     /// Keynote-style dip through black at the clip edges: ease toward black
     /// while very slightly zooming.
     private func applyTransition(at t: Double, to image: CIImage) -> CIImage {
         let duration = input.duration
-        guard input.transitionDuration > 0, duration > 0 else { return image }
-        let fade = min(input.transitionDuration, max(0.05, duration / 2 - 0.05))
+        guard let fade = Self.fadeDuration(of: input) else { return image }
         let u: Double
         if t < fade {
             u = easeInOutCubic(t / fade)
