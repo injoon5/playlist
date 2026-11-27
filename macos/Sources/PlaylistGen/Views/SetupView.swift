@@ -24,58 +24,67 @@ struct SetupView: View {
     @Environment(\.undoManager) private var undoManager
     /// Remembered across launches and across visits to the run screen.
     @AppStorage("showInspector") private var showInspector = true
+    @AppStorage("inspectorWidth") private var inspectorWidth = 340.0
 
     var body: some View {
         @Bindable var model = model
-        trackArea
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !model.tracks.isEmpty { StatusBar() }
-            }
-            .inspector(isPresented: $showInspector) {
-                InspectorView()
-                    .inspectorColumnWidth(min: 300, ideal: 340, max: 460)
-            }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    PlaylistLinkField()
+        // The video settings are a trailing panel rather than `.inspector`:
+        // an inspector splits the toolbar at its divider, and `.principal`
+        // then centres the link field over the list only, so the field slid
+        // whenever the inspector opened. With one toolbar section, AppKit
+        // centres it on the window (`NSToolbar.centeredItemIdentifiers`).
+        HStack(spacing: 0) {
+            trackArea
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if !model.tracks.isEmpty { StatusBar() }
                 }
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        model.requestGenerate()
-                    } label: {
-                        // "film" sits on the text's centre line; "film.stack" rode high.
-                        Label("Generate", systemImage: "film")
-                            .labelStyle(.titleAndIcon)
-                    }
-                    .buttonStyle(.glassProminent)
-                    .disabled(!model.canGenerate)
-                    .help(model.generateBlocker ?? "Make one video from the included songs (⌘↩)")
-                }
-                ToolbarSpacer(.fixed, placement: .primaryAction)
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label("Video Settings", systemImage: "sidebar.trailing")
-                    }
-                    .help(showInspector ? "Hide video settings" : "Show video settings")
-                }
+            if showInspector {
+                SettingsPanel(width: $inspectorWidth)
+                    .transition(.move(edge: .trailing))
             }
-            .navigationTitle("Playlist Gen")
-            .navigationSubtitle(subtitle)
-            .alert(
-                "“\((model.confirmReplacePath.map { ($0 as NSString).lastPathComponent }) ?? "")” already exists. Do you want to replace it?",
-                isPresented: Binding(get: { model.confirmReplacePath != nil }, set: { if !$0 { model.confirmReplacePath = nil } })
-            ) {
-                Button("Replace", role: .destructive) {
-                    model.confirmReplacePath = nil
-                    model.generate()
-                }
-                Button("Cancel", role: .cancel) { model.confirmReplacePath = nil }
-            } message: {
-                Text("The existing video is overwritten when the new one is finished. To keep both, choose another name under Save To.")
+        }
+        .animation(.smooth(duration: 0.25), value: showInspector)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                PlaylistLinkField()
             }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    model.requestGenerate()
+                } label: {
+                    // "film" sits on the text's centre line; "film.stack" rode high.
+                    Label("Generate", systemImage: "film")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(!model.canGenerate)
+                .help(model.generateBlocker ?? "Make one video from the included songs (⌘↩)")
+            }
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showInspector.toggle()
+                } label: {
+                    Label("Video Settings", systemImage: "sidebar.trailing")
+                }
+                .help(showInspector ? "Hide video settings" : "Show video settings")
+            }
+        }
+        .navigationTitle("Playlist Gen")
+        .navigationSubtitle(subtitle)
+        .alert(
+            "“\((model.confirmReplacePath.map { ($0 as NSString).lastPathComponent }) ?? "")” already exists. Do you want to replace it?",
+            isPresented: Binding(get: { model.confirmReplacePath != nil }, set: { if !$0 { model.confirmReplacePath = nil } })
+        ) {
+            Button("Replace", role: .destructive) {
+                model.confirmReplacePath = nil
+                model.generate()
+            }
+            Button("Cancel", role: .cancel) { model.confirmReplacePath = nil }
+        } message: {
+            Text("The existing video is overwritten when the new one is finished. To keep both, choose another name under Save To.")
+        }
     }
 
     private var subtitle: String {
@@ -162,6 +171,39 @@ private struct PlaylistLinkField: View {
         }
         .padding(.horizontal, 10)
         .frame(minWidth: 320, idealWidth: 460, maxWidth: 560)
+    }
+}
+
+/// The video settings beside the list: a divider you can drag to resize
+/// (300–460 pt, remembered), then the settings form.
+private struct SettingsPanel: View {
+    @Binding var width: Double
+    @State private var dragStart: Double?
+
+    static let range = 300.0...460.0
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Divider()
+                .overlay {
+                    Color.clear
+                        .frame(width: 8)
+                        .contentShape(Rectangle())
+                        .pointerStyle(.frameResize(position: .leading))
+                        .gesture(
+                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                .onChanged { drag in
+                                    let start = dragStart ?? width
+                                    dragStart = start
+                                    width = min(max(start - drag.translation.width, Self.range.lowerBound), Self.range.upperBound)
+                                }
+                                .onEnded { _ in dragStart = nil }
+                        )
+                        .accessibilityHidden(true)
+                }
+            InspectorView()
+                .frame(width: min(max(width, Self.range.lowerBound), Self.range.upperBound))
+        }
     }
 }
 

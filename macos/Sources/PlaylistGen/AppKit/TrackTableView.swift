@@ -429,6 +429,21 @@ final class TrackNSTableView: NSTableView {
     var onCopy: (() -> Void)?
     var onDelete: (() -> Void)?
 
+    /// Columns restored from autosave (or saved while the inspector was
+    /// hidden) can add up to more than the visible width; uniform resizing
+    /// only scales them relative to each other, so fit them back in.
+    private var fitting = false
+    override func layout() {
+        super.layout()
+        guard !fitting, let clip = enclosingScrollView?.contentView else { return }
+        let total = tableColumns.reduce(0) { $0 + $1.width + intercellSpacing.width }
+        if total > clip.bounds.width + 1 {
+            fitting = true
+            sizeToFit()
+            fitting = false
+        }
+    }
+
     /// Take keyboard focus when the list appears (after loading, relaunching
     /// or returning from the run screen) so arrow keys and Space just work.
     override func viewDidMoveToWindow() {

@@ -15,7 +15,7 @@ struct PlaylistGenApp: App {
         .defaultSize(width: 1240, height: 780)
         .commands {
             PlaylistCommands(model: model)
-            InspectorCommands()
+            SettingsPanelCommands()
         }
 
         Settings {
@@ -106,5 +106,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         model.shutdown()
         return .terminateNow
+    }
+}
+
+/// View › Show/Hide Video Settings (what `InspectorCommands` did for the
+/// system inspector).
+struct SettingsPanelCommands: Commands {
+    @AppStorage("showInspector") private var showInspector = true
+
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button(showInspector ? "Hide Video Settings" : "Show Video Settings") {
+                withAnimation { showInspector.toggle() }
+            }
+            .keyboardShortcut("i", modifiers: [.command, .control])
+        }
     }
 }
